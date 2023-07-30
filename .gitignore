@@ -15,7 +15,6 @@ _deps
 braincheck
 generated-includes
 tests
-.devcontainer
 .vscode
 *.d
 *.slo
