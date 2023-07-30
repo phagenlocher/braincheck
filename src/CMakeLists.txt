@@ -22,8 +22,8 @@ target_link_directories(${PROJECT_NAME} PRIVATE argparse)
 target_link_libraries(${PROJECT_NAME} argparse)
 
 # External
-target_include_directories(${PROJECT_NAME} PRIVATE /usr/local/include)
-target_link_directories(${PROJECT_NAME} PRIVATE /usr/local/lib)
+target_include_directories(${PROJECT_NAME} PRIVATE extern/spotlib)
+target_link_directories(${PROJECT_NAME} PRIVATE extern/spotlib)
 target_link_libraries(${PROJECT_NAME} spot)
 target_link_libraries(${PROJECT_NAME} bddx)
 

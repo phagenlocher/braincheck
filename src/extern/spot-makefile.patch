@@ -1,0 +1,11 @@
+--- Makefile	2023-07-30 10:55:20.355440327 +0000
++++ Makefile.fixed	2023-07-30 10:55:17.274227129 +0000
+@@ -1228,7 +1228,7 @@
+ #NEVER_SUBDIRS = bench elisp
+ #PYTHON_SUBDIR = python
+ DOC_SUBDIR = doc
+-SUBDIRS = picosat buddy lib ltdl spot bin tests $(PYTHON_SUBDIR) $(DOC_SUBDIR) \
++SUBDIRS = picosat buddy lib ltdl spot bin tests $(PYTHON_SUBDIR) \
+ 					$(NEVER_SUBDIRS)
+ 
+ UTF8 = utf8/README.md utf8/LICENSE utf8/utf8.h	\
