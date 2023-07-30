@@ -36,8 +36,12 @@ target_link_libraries(argparse PRIVATE CLI11::CLI11)
 target_link_libraries(argparse PRIVATE brainfuck)
 
 # Tests
-add_executable(tests tests.cpp)
+add_compile_options(-lrt -lm)
+add_executable(tests EXCLUDE_FROM_ALL tests.cpp)
 target_include_directories(tests PRIVATE brainfuck)
 target_include_directories(tests PRIVATE extern/minunit)
 target_link_directories(tests PRIVATE extern/minunit)
 target_link_libraries(tests PRIVATE brainfuck)
+# Not using CTest since minunit does everything we need
+add_custom_target(test)
+add_custom_command(TARGET test POST_BUILD COMMAND tests)
