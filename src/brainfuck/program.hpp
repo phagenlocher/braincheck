@@ -52,6 +52,7 @@ namespace brainfuck
     class ParseException : public std::exception
     {
     private:
+        using std::exception::what;
         std::string message;
 
     public:
