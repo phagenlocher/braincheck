@@ -1,21 +1,26 @@
+find_library(SPOT_LIB "spot" "${CMAKE_CURRENT_SOURCE_DIR}/spotlib/*" NO_CACHE NO_DEFAULT_PATH)
+if (SPOT_LIB-NOTFOUND OR SPOT_LIB STREQUAL "SPOT_LIB-NOTFOUND")
+
+message (STATUS "Couldn't find spot in ${CMAKE_CURRENT_SOURCE_DIR}/spotlib, building it now.")
+
 find_program (AUTORECONF autoreconf)
 if (NOT AUTORECONF)
-    message (FATAL_ERROR "Missing autoreconf. Install autoconf package and try again.")
+    message (FATAL_ERROR "Missing autoreconf. Install the autoconf package and try again.")
 endif ()
 
 find_program (AUTOMAKE automake)
 if (NOT AUTOMAKE)
-    message (FATAL_ERROR "Missing automake. Install autoconf package and try again.")
+    message (FATAL_ERROR "Missing automake. Install the autoconf package and try again.")
 endif ()
 
 find_program (LIBTOOLIZE NAMES libtoolize glibtoolize)
 if (NOT LIBTOOLIZE)
-    message (FATAL_ERROR "Missing libtoolize. Install libtool package and try again.")
+    message (FATAL_ERROR "Missing libtoolize. Install libtool and try again.")
 endif ()
 
 find_program (PATCH NAMES patch)
 if (NOT PATCH)
-    message (FATAL_ERROR "Missing patch. Install patch package and try again.")
+    message (FATAL_ERROR "Missing patch. Install patch and try again.")
 endif ()
 
 message(STATUS "Configuring spot in ${CMAKE_CURRENT_SOURCE_DIR}/spot")
@@ -52,3 +57,9 @@ execute_process(
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/spot
     COMMAND_ERROR_IS_FATAL ANY
 )
+
+else()
+
+message (STATUS "Found spot: ${SPOT_LIB}. Not building it again!")
+
+endif ()
