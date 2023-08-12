@@ -1,0 +1,35 @@
+name: CMake Build and Test
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        submodules: recursive
+
+    - name: Install dependencies
+      run: sudo apt-get install -y autoconf libtool patch bison flex
+
+    - name: Configure project
+      working-directory: ${{github.workspace}}
+      run: cmake ${{github.workspace}}
+
+    - name: Compile
+      working-directory: ${{github.workspace}}
+      run: make
+
+    - name: Test
+      working-directory: ${{github.workspace}}
+      run: make test
+
