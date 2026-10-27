@@ -1,9 +1,10 @@
 add_library(
     brainfuck STATIC
-    program.cpp
-    kripke.cpp
-    model.cpp
     analysis.cpp
+    kripke.cpp
+    memory_map.cpp
+    model.cpp
+    program.cpp
 )
 
 target_include_directories(brainfuck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../extern/spotlib/include)

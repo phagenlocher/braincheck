@@ -23,6 +23,21 @@ if (NOT PATCH)
     message (FATAL_ERROR "Missing patch. Install patch and try again.")
 endif ()
 
+find_program (YACC NAMES yacc)
+if (NOT YACC)
+    message (FATAL_ERROR "Missing yacc. Install byacc and try again.")
+endif ()
+
+find_program (BISON NAMES bison)
+if (NOT BISON)
+    message (FATAL_ERROR "Missing bison. Install bison and try again.")
+endif ()
+
+find_program (FLEX NAMES flex)
+if (NOT FLEX)
+    message (FATAL_ERROR "Missing flex. Install flex and try again.")
+endif ()
+
 message(STATUS "Configuring spot in ${CMAKE_CURRENT_SOURCE_DIR}/spot")
 
 execute_process(

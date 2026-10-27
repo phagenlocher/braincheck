@@ -8,6 +8,13 @@ endif()
 
 add_executable(${PROJECT_NAME} main.cpp)
 
+# Drop the debug info that Spot's static archives carry, so the shipped static
+# binary is small (Spot's libs are built with -g, hence the ~88M unstripped).
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_STRIP} --strip-debug $<TARGET_FILE:${PROJECT_NAME}>
+    COMMENT "Stripping debug info from ${PROJECT_NAME}"
+    VERBATIM)
+
 add_subdirectory(extern)
 add_subdirectory(brainfuck)
 add_subdirectory(argparse)

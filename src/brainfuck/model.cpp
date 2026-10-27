@@ -1,103 +1,157 @@
+#include <algorithm>
+#include <cstdlib>
 #include <iostream>
+#include <limits>
+#include <stdexcept>
+#include <utility>
 #include "model.hpp"
 
 namespace brainfuck
 {
     MemoryModel::MemoryModel(CellSize cell_size, memory_size_t size, bool wrapping)
+        : cell_size(cell_size),
+          memory_size(size),
+          wrapping(wrapping),
+          ptr(0),
+          memory()
     {
-        this->cell_size = cell_size;
-        this->memory_size = size;
-        this->wrapping = wrapping;
-        this->ptr = 0;
-        this->memory = std::map<mem_ptr_t, uint32_t>();
+        if (size == 0)
+            throw std::invalid_argument("MemoryModel needs at least one cell");
     }
 
     MemoryModel::~MemoryModel()
     {
     }
 
-    void MemoryModel::reset()
+    mem_ptr_t MemoryModel::pointer_left(mem_ptr_t ptr) const
     {
-        this->ptr = 0;
-        this->memory = std::map<mem_ptr_t, uint32_t>();
-    }
-
-    void MemoryModel::left()
-    {
-        if (this->ptr > 0)
-            this->ptr--;
+        if (ptr > 0)
+            return ptr - 1;
         else if (this->wrapping)
-            this->ptr = this->memory_size - 1;
-        else
-            this->ptr = 0;
-    }
-
-    void MemoryModel::right()
-    {
-        if (this->ptr < this->memory_size - 1)
-            this->ptr++;
-        else if (this->wrapping)
-            this->ptr = 0;
-        else
-            this->ptr = this->memory_size - 1;
-    }
-
-    void MemoryModel::increment()
-    {
-        uint32_t value = this->get_value(this->ptr);
-        if (value == this->get_max_value())
-            this->memory[this->ptr] = 0;
-        else
-            this->memory[this->ptr] = value + 1;
-    }
-
-    void MemoryModel::decrement()
-    {
-        uint32_t value = this->get_value(this->ptr);
-        if (value == 0)
-            this->memory[this->ptr] = this->get_max_value();
-        else
-            this->memory[this->ptr] = value - 1;
-    }
-
-    mem_ptr_t MemoryModel::get_pointer()
-    {
-        return this->ptr;
-    }
-
-    uint32_t MemoryModel::get_value(mem_ptr_t ptr)
-    {
-        if (this->memory.count(ptr) > 0)
-            return this->memory[ptr];
+            return this->memory_size - 1;
         else
             return 0;
     }
 
-    void MemoryModel::set_value(mem_ptr_t ptr, uint8_t value)
+    mem_ptr_t MemoryModel::pointer_right(mem_ptr_t ptr) const
     {
-        this->memory[ptr] = (uint32_t)value;
+        if (ptr + 1 < this->memory_size)
+            return ptr + 1;
+        else if (this->wrapping)
+            return 0;
+        else
+            return this->memory_size - 1;
     }
 
-    void MemoryModel::set_value(mem_ptr_t ptr, uint32_t value)
+    cell_value_t MemoryModel::next_value(cell_value_t value) const
     {
-        if (this->cell_size == CellSize::EightBit)
-            value %= UINT8_MAX + 1;
-        else if (this->cell_size == CellSize::SixteenBit)
-            value %= UINT16_MAX + 1;
-        this->memory[ptr] = value;
+        if (value >= this->get_max_value())
+            return 0;
+        else
+            return value + 1;
     }
 
-    uint32_t MemoryModel::get_current_value()
+    cell_value_t MemoryModel::prev_value(cell_value_t value) const
+    {
+        if (value == 0)
+            return this->get_max_value();
+        else
+            return value - 1;
+    }
+
+    cell_value_t MemoryModel::normalize_value(uint64_t value) const
+    {
+        // Cell sizes are powers of two, so masking is equivalent to a modulo
+        // and cannot overflow (get_max_value() + 1 would wrap for 32 bit).
+        return static_cast<cell_value_t>(value & this->get_max_value());
+    }
+
+    cell_value_t MemoryModel::shift_value(cell_value_t value, int64_t delta) const
+    {
+        // Converting a negative delta to uint64_t is a modulo 2^64, and every
+        // cell width divides 2^64, so masking afterwards stays exact.
+        return this->normalize_value(
+            static_cast<uint64_t>(value) + static_cast<uint64_t>(delta));
+    }
+
+    mem_ptr_t MemoryModel::move_pointer(mem_ptr_t ptr, int64_t net, mem_ptr_t low, mem_ptr_t high) const
+    {
+        if (this->wrapping)
+        {
+            const int64_t size = static_cast<int64_t>(this->memory_size);
+            int64_t moved = (static_cast<int64_t>(ptr) + net) % size;
+            if (moved < 0)
+                moved += size;
+            return static_cast<mem_ptr_t>(moved);
+        }
+
+        // A clamping tape loses track of moves that hit an edge, so a block is
+        // not just its net displacement: bounds the block's composition with
+        // itself. Both are precomputed once per block (see Program).
+        int64_t moved = static_cast<int64_t>(ptr) + net;
+        if (moved < static_cast<int64_t>(low))
+            moved = static_cast<int64_t>(low);
+        else if (moved > static_cast<int64_t>(high))
+            moved = static_cast<int64_t>(high);
+        return static_cast<mem_ptr_t>(moved);
+    }
+
+    void MemoryModel::reset()
+    {
+        this->ptr = 0;
+        this->memory.clear();
+    }
+
+    void MemoryModel::left()
+    {
+        this->ptr = this->pointer_left(this->ptr);
+    }
+
+    void MemoryModel::right()
+    {
+        this->ptr = this->pointer_right(this->ptr);
+    }
+
+    void MemoryModel::increment()
+    {
+        // A single lookup: the cell is created on demand and updated in place.
+        cell_value_t &value = this->memory[this->ptr];
+        value = this->next_value(value);
+    }
+
+    void MemoryModel::decrement()
+    {
+        cell_value_t &value = this->memory[this->ptr];
+        value = this->prev_value(value);
+    }
+
+    mem_ptr_t MemoryModel::get_pointer() const
+    {
+        return this->ptr;
+    }
+
+    cell_value_t MemoryModel::get_value(mem_ptr_t ptr) const
+    {
+        const auto it = this->memory.find(ptr);
+        return it == this->memory.end() ? 0 : it->second;
+    }
+
+    void MemoryModel::set_value(mem_ptr_t ptr, cell_value_t value)
+    {
+        this->memory.insert_or_assign(ptr, this->normalize_value(value));
+    }
+
+    cell_value_t MemoryModel::get_current_value() const
     {
         return this->get_value(this->ptr);
     }
 
-    void MemoryModel::set_current_value(uint32_t value)
+    void MemoryModel::set_current_value(cell_value_t value)
     {
-        return this->set_value(this->ptr, value);
+        this->set_value(this->ptr, value);
     }
 
-    uint32_t MemoryModel::get_max_value() const
+    cell_value_t MemoryModel::get_max_value() const
     {
         switch (this->cell_size)
         {
@@ -109,24 +163,59 @@ namespace brainfuck
 
         case CellSize::ThirtyTwoBit:
             return UINT32_MAX;
-
-        default:
-            abort();
         }
+        std::abort();
+    }
+
+    CellSize MemoryModel::get_cell_size() const
+    {
+        return this->cell_size;
+    }
+
+    memory_size_t MemoryModel::get_memory_size() const
+    {
+        return this->memory_size;
+    }
+
+    bool MemoryModel::is_wrapping() const
+    {
+        return this->wrapping;
+    }
+
+    void MemoryModel::set_cell_size(CellSize cell_size)
+    {
+        this->cell_size = cell_size;
+    }
+
+    void MemoryModel::set_memory_size(memory_size_t size)
+    {
+        if (size == 0)
+            throw std::invalid_argument("MemoryModel needs at least one cell");
+
+        this->memory_size = size;
+        if (this->ptr >= size)
+            this->ptr = size - 1;
+    }
+
+    void MemoryModel::set_wrapping(bool wrapping)
+    {
+        this->wrapping = wrapping;
     }
 
     IOModel::IOModel()
+        : chars_until_eof(std::nullopt),
+          no_change_on_eof(false),
+          eof_char(0),
+          input(std::nullopt)
     {
-        this->chars_until_eof = std::nullopt;
-        this->eof_char = 0;
-        this->no_change_on_eof = false;
     }
 
     IOModel::IOModel(size_t chars_until_eof)
+        : chars_until_eof(std::make_optional(chars_until_eof)),
+          no_change_on_eof(false),
+          eof_char(0),
+          input(std::nullopt)
     {
-        this->chars_until_eof = std::make_optional(chars_until_eof);
-        this->eof_char = 0;
-        this->no_change_on_eof = false;
     }
 
     std::optional<size_t> IOModel::get_chars_until_eof() const
@@ -134,9 +223,43 @@ namespace brainfuck
         return this->chars_until_eof;
     }
 
-    void IOModel::set_eof_char(uint8_t eof_char)
+    void IOModel::set_chars_until_eof(size_t chars_until_eof)
+    {
+        this->chars_until_eof = std::make_optional(chars_until_eof);
+    }
+
+    void IOModel::set_input(std::string bytes)
+    {
+        // The budget is the cursor into the pinned input, so it has to start at
+        // the input's length; the state's remaining count then names the next
+        // byte without carrying the input itself.
+        this->chars_until_eof = std::make_optional(bytes.size());
+        this->input = std::make_optional(std::move(bytes));
+    }
+
+    bool IOModel::has_input() const
+    {
+        return this->input.has_value();
+    }
+
+    const std::optional<std::string> &IOModel::get_input() const
+    {
+        return this->input;
+    }
+
+    size_t IOModel::input_index(size_t chars_left) const
+    {
+        return this->input.value().size() - chars_left;
+    }
+
+    void IOModel::set_eof_char(io_char_t eof_char)
     {
         this->eof_char = eof_char;
+    }
+
+    io_char_t IOModel::get_eof_char() const
+    {
+        return this->eof_char;
     }
 
     void IOModel::set_no_change_on_eof(bool no_change)
@@ -144,59 +267,86 @@ namespace brainfuck
         this->no_change_on_eof = no_change;
     }
 
-    void IOModel::set_chars_until_eof(size_t chars_until_eof)
+    bool IOModel::is_no_change_on_eof() const
     {
-        this->chars_until_eof = std::make_optional(chars_until_eof);
+        return this->no_change_on_eof;
     }
 
-    uint8_t IOModel::read_next_char()
+    std::optional<io_char_t> IOModel::read_next_char()
     {
-        char in;
-        std::cin >> in;
-        if (std::cin.eof())
-            in = 0;
-        return (uint8_t)in;
+        if (this->chars_until_eof.has_value() && this->chars_until_eof.value() == 0)
+            return std::nullopt;
+
+        if (this->input.has_value())
+        {
+            // A pinned input never touches the stream, so `execute --input`
+            // ignores a piped stdin.
+            const std::string &bytes = this->input.value();
+            const size_t remaining = this->chars_until_eof.has_value()
+                                         ? std::min(this->chars_until_eof.value(), bytes.size())
+                                         : bytes.size();
+            if (remaining == 0)
+                return std::nullopt;
+
+            const io_char_t character = static_cast<io_char_t>(bytes[this->input_index(remaining)]);
+            this->chars_until_eof = std::make_optional(remaining - 1);
+            return character;
+        }
+
+        // std::cin >> c would skip whitespace, which would silently drop
+        // space, tab and newline input characters.
+        const int next_byte = std::cin.get();
+        if (next_byte == std::char_traits<char>::eof())
+            return std::nullopt;
+
+        if (this->chars_until_eof.has_value())
+            this->chars_until_eof = this->chars_until_eof.value() - 1;
+
+        return static_cast<io_char_t>(next_byte);
     }
 
-    static const std::vector<uint8_t>
-        all_possible_chars{0, 1, 2, 3, 4, 5, 6, 7,
-                           8, 9, 10, 11, 12, 13, 14, 15,
-                           16, 17, 18, 19, 20, 21, 22, 23,
-                           24, 25, 26, 27, 28, 29, 30, 31,
-                           32, 33, 34, 35, 36, 37, 38, 39,
-                           40, 41, 42, 43, 44, 45, 46, 47,
-                           48, 49, 50, 51, 52, 53, 54, 55,
-                           56, 57, 58, 59, 60, 61, 62, 63,
-                           64, 65, 66, 67, 68, 69, 70, 71,
-                           72, 73, 74, 75, 76, 77, 78, 79,
-                           80, 81, 82, 83, 84, 85, 86, 87,
-                           88, 89, 90, 91, 92, 93, 94, 95,
-                           96, 97, 98, 99, 100, 101, 102, 103,
-                           104, 105, 106, 107, 108, 109, 110, 111,
-                           112, 113, 114, 115, 116, 117, 118, 119,
-                           120, 121, 122, 123, 124, 125, 126, 127,
-                           128, 129, 130, 131, 132, 133, 134, 135,
-                           136, 137, 138, 139, 140, 141, 142, 143,
-                           144, 145, 146, 147, 148, 149, 150, 151,
-                           152, 153, 154, 155, 156, 157, 158, 159,
-                           160, 161, 162, 163, 164, 165, 166, 167,
-                           168, 169, 170, 171, 172, 173, 174, 175,
-                           176, 177, 178, 179, 180, 181, 182, 183,
-                           184, 185, 186, 187, 188, 189, 190, 191,
-                           192, 193, 194, 195, 196, 197, 198, 199,
-                           200, 201, 202, 203, 204, 205, 206, 207,
-                           208, 209, 210, 211, 212, 213, 214, 215,
-                           216, 217, 218, 219, 220, 221, 222, 223,
-                           224, 225, 226, 227, 228, 229, 230, 231,
-                           232, 233, 234, 235, 236, 237, 238, 239,
-                           240, 241, 242, 243, 244, 245, 246, 247,
-                           248, 249, 250, 251, 252, 253, 254, 255};
-
-    std::vector<uint8_t> IOModel::read_possible_chars()
+    //! Builds the alphabet `0..255` once, so every read can share it.
+    static std::vector<io_char_t> make_all_possible_chars()
     {
+        std::vector<io_char_t> chars;
+        chars.reserve(static_cast<size_t>(std::numeric_limits<io_char_t>::max()) + 1);
+        for (unsigned int c = 0; c <= std::numeric_limits<io_char_t>::max(); c++)
+            chars.push_back(static_cast<io_char_t>(c));
+        return chars;
+    }
+
+    //! Shared alphabet of every character a read can deliver; never modified.
+    static const std::vector<io_char_t> all_possible_chars = make_all_possible_chars();
+
+    std::vector<io_char_t> IOModel::read_possible_chars()
+    {
+        if (this->input.has_value())
+        {
+            const std::string &bytes = this->input.value();
+            const size_t remaining = this->chars_until_eof.has_value()
+                                         ? std::min(this->chars_until_eof.value(), bytes.size())
+                                         : bytes.size();
+
+            if (remaining > 0)
+            {
+                this->chars_until_eof = std::make_optional(remaining - 1);
+                return std::vector<io_char_t>{
+                    static_cast<io_char_t>(bytes[this->input_index(remaining)])};
+            }
+            else if (this->no_change_on_eof)
+            {
+                return std::vector<io_char_t>{};
+            }
+            else
+            {
+                return std::vector<io_char_t>{this->eof_char};
+            }
+        }
+
         if (!this->chars_until_eof.has_value())
             return all_possible_chars;
-        size_t chars_left = this->chars_until_eof.value();
+
+        const size_t chars_left = this->chars_until_eof.value();
         if (chars_left > 0)
         {
             this->chars_until_eof = std::make_optional(chars_left - 1);
@@ -204,31 +354,111 @@ namespace brainfuck
         }
         else if (this->no_change_on_eof)
         {
-            return std::vector<uint8_t>{};
+            return std::vector<io_char_t>{};
         }
         else
         {
-            return std::vector<uint8_t>{this->eof_char};
+            return std::vector<io_char_t>{this->eof_char};
         }
     }
 
-    std::vector<uint8_t> IOModel::get_possible_chars(std::optional<size_t> m_chars_left)
+    std::vector<io_char_t> IOModel::get_possible_chars(std::optional<size_t> chars_left) const
     {
-        size_t chars_left = 1;
-        if (m_chars_left.has_value())
-            chars_left = m_chars_left.value();
+        if (this->input.has_value())
+        {
+            const std::string &bytes = this->input.value();
+            const size_t remaining = chars_left.has_value()
+                                         ? std::min(chars_left.value(), bytes.size())
+                                         : bytes.size();
 
-        if (chars_left > 0)
-        {
+            if (remaining > 0)
+                return std::vector<io_char_t>{
+                    static_cast<io_char_t>(bytes[this->input_index(remaining)])};
+            else if (this->no_change_on_eof)
+                return std::vector<io_char_t>{};
+            else
+                return std::vector<io_char_t>{this->eof_char};
+        }
+
+        const size_t remaining = chars_left.has_value() ? chars_left.value() : 1;
+
+        if (remaining > 0)
             return all_possible_chars;
-        }
         else if (this->no_change_on_eof)
-        {
-            return std::vector<uint8_t>{};
-        }
+            return std::vector<io_char_t>{};
         else
+            return std::vector<io_char_t>{this->eof_char};
+    }
+
+    namespace
+    {
+        //! Value of \a c as a hexadecimal digit, or -1 when it is not one.
+        int hex_digit_value(char c)
         {
-            return std::vector<uint8_t>{this->eof_char};
+            if (c >= '0' && c <= '9')
+                return c - '0';
+            if (c >= 'a' && c <= 'f')
+                return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F')
+                return c - 'A' + 10;
+            return -1;
         }
+    }
+
+    std::string decode_input_escapes(const std::string &text)
+    {
+        std::string decoded;
+        decoded.reserve(text.size());
+
+        for (size_t i = 0; i < text.size(); i++)
+        {
+            if (text[i] != '\\')
+            {
+                decoded.push_back(text[i]);
+                continue;
+            }
+
+            if (i + 1 >= text.size())
+                throw std::invalid_argument("input ends with a lone backslash");
+
+            const char escape = text[++i];
+            switch (escape)
+            {
+            case '\\':
+                decoded.push_back('\\');
+                break;
+            case 'n':
+                decoded.push_back('\n');
+                break;
+            case 't':
+                decoded.push_back('\t');
+                break;
+            case 'r':
+                decoded.push_back('\r');
+                break;
+            case '0':
+                decoded.push_back('\0');
+                break;
+            case 'x':
+            {
+                // Exactly two digits keep `\x41bc` unambiguous: it is `A` + "bc".
+                if (i + 2 >= text.size())
+                    throw std::invalid_argument("\\x needs exactly two hexadecimal digits");
+
+                const int high = hex_digit_value(text[i + 1]);
+                const int low = hex_digit_value(text[i + 2]);
+                if (high < 0 || low < 0)
+                    throw std::invalid_argument("\\x needs exactly two hexadecimal digits");
+
+                decoded.push_back(static_cast<char>(high * 16 + low));
+                i += 2;
+                break;
+            }
+            default:
+                throw std::invalid_argument(std::string("unknown escape \\") + escape);
+            }
+        }
+
+        return decoded;
     }
 }
