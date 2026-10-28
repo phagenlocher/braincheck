@@ -4,6 +4,3 @@
 [submodule "src/extern/CLI11"]
 	path = src/extern/CLI11
 	url = https://github.com/CLIUtils/CLI11.git
-[submodule "src/extern/spot"]
-	path = src/extern/spot
-	url = https://gitlab.lre.epita.fr/spot/spot.git

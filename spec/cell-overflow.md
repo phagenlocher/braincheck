@@ -1,13 +1,13 @@
 # Cell overflow checks (`check overflow`)
 
 Implemented in `src/brainfuck/analysis.cpp` on top of
-[the state space](state-space.md) and Spot.
+[the state space](state-space.md) and `search_eventually()` in `search.{hpp,cpp}`.
 
-## The question that is answered
+## The property that is verified
 
 ```text
 check overflow FILE CELL [--direction both|overflow|underflow]
-    Does some run contain a step that wraps cell CELL?       (!G(wrap))
+    Does every run stay inside the cell's range?          A G(!wrap)
 ```
 
 A **wrap** is the step that leaves the cell's range:
@@ -29,29 +29,33 @@ The answers are:
 
 | Command | Result | Meaning |
 | --- | --- | --- |
-| `check overflow` | `Cell N can wrap on some run:` | a witness run is printed |
-| `check overflow` | `Cell N never wraps on any run.` | no run wraps the cell |
-| `check overflow --direction overflow` | `... can overflow ...` / `... never overflows ...` | the same question for `+` only |
-| `check overflow --direction underflow` | `... can underflow ...` / `... never underflows ...` | the same question for `-` only |
+| `check overflow` | `Cell N never wraps on any run.` | the property holds: no run wraps the cell |
+| `check overflow` | `There exists a run in which cell N wraps:` | a counterexample run is printed |
+| `check overflow --direction overflow` | `... never overflows ...` / `There exists a run in which cell N overflows:` | the same statement for `+` only |
+| `check overflow --direction underflow` | `... never underflows ...` / `There exists a run in which cell N underflows:` | the same statement for `-` only |
 
-## Why the check is existential
+"Never wraps" is the result we want and is printed in green; a counterexample is
+a defect and is printed in red with the run that produces it.
 
-There is no "every run" variant. A wrap is an event to hunt for - a bug, an
-out-of-range result, a missed boundary - not a property that every run should
-satisfy. Asking whether *every* run wraps would answer "no" with a
-counterexample for almost every real program, and a program with an infinite
-run that never wraps would be the counterexample even though it is the run that
-matters least.
+## Why it hunts for a counterexample
 
-The check therefore always asks "can this cell wrap?" and reports either the
-witness or that no run wraps it. The witness is the run that shows the event,
-truncated where it happens.
+There is no "every run wraps" mode. A wrap is a defect - an out-of-range
+result, a missed boundary - so the useful statement is the safety property "no
+run ever wraps this cell". Proving it means checking every run, which is exactly
+what the search does: it looks for a wrapping step and reports the run when it
+finds one.
+
+That is also why the answer is cheap in the negative case and informative in the
+positive one: the first wrapping step is a witness of the *bug*, and a search
+that finds none is the proof that the property holds (on a finite state space,
+see [input.md](input.md)). Asking the opposite - "must every run wrap?" - is
+not a question anyone has, and its counterexample would be almost every run.
 
 ## What is observed
 
 A wrap is a **transition** property, not a state property. Holding the maximum
-is not an overflow; the overflow is the `+` that crosses it. The Kripke
-condition is therefore true in the state *before* that step:
+is not an overflow; the overflow is the `+` that crosses it. The observed atom
+is therefore true in the state *before* that step (`Kripke::observes()`):
 
 ```text
 wrap(pc, mem_ptr, memory) =
@@ -64,8 +68,8 @@ with the direction filter applied afterwards. The state the wrap produces is
 **not** marked: a cell holding zero or the maximum is indistinguishable from any
 other and says nothing about how it got there.
 
-Spot labels every transition leaving a state with that state's condition, which
-is what makes a transition property expressible as a state condition (see
+The predicate is evaluated on the state a transition leaves, which is what makes
+a transition property expressible as a state predicate (see
 [state-space.md](state-space.md)). Consequences:
 
 - **The initial state can already be a wrapping state.** A program that starts
@@ -82,14 +86,14 @@ is what makes a transition property expressible as a state condition (see
 
 ## Direction
 
-The witness stops at the first wrap of the selected direction and its marker
-names the direction and the values:
+The counterexample stops at the first wrap of the selected direction and its
+marker names the direction and the values:
 
 ```text
 -+  <- cell 0 overflows (255 + 1 -> 0)
 ```
 
-With the default `--direction both` the witness stops at the first wrap of
+With the default `--direction both` the counterexample stops at the first wrap of
 either kind, so it only proves the direction it shows. Ask
 `--direction overflow` (or `underflow`) separately if you need to know whether
 the other one can happen too. A program that only underflows a cell is reported
@@ -100,23 +104,23 @@ as never overflowing it when the direction is narrowed.
 A wrap is one `+` or one `-`, so `check overflow` uses `Folding::pointers`:
 `>`/`<` runs are folded (they change no cell) and every `+`/`-` stays its own
 state. A folded `++++…+` would hide the single increment that crosses the
-maximum and the check would answer "never wraps".
+maximum, and the check would wrongly answer "never wraps".
 
 The printed run is folding-aware, so one printed step always matches one
 transition (see [state-space.md](state-space.md)).
 
-## Witness runs
+## Counterexample runs
 
-The witness is a lasso like every other analysis result, but it is truncated at
-the first wrapping state: the last printed step is the `+` or `-` that wraps,
-and the marker names the direction and the values:
+The counterexample is a run of the program, truncated at the first wrapping
+state: the last printed step is the `+` or `-` that wraps, and the marker names
+the direction and the values:
 
 ```text
 -+  <- cell 0 overflows (255 + 1 -> 0)
 ```
 
 The rest of the run is not part of the answer. A program that never wraps has no
-witness at all, so the answer is the plain sentence
+counterexample at all, so the answer is the plain green sentence
 `Cell N never wraps on any run.`
 
 No source label is highlighted, because the property is about a cell, not a
@@ -154,7 +158,7 @@ The check is exact over the concrete state space (memory contents, input
 budget, tape configuration), not over an abstraction. It does not merge states
 reached by different paths and does not infer invariants.
 
-A successful `--direction overflow` states that some run executes a `+` on a
+A counterexample for `--direction overflow` shows a run that executes a `+` on a
 cell holding the maximum. It does not claim the value is "too large" for
 anything else: Brainfuck has no undefined overflow, only wrapping, so the wrap
 itself is the whole observable event.

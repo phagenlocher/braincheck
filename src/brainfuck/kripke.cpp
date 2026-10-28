@@ -1,9 +1,7 @@
 #include <map>
-#include <set>
-#include <sstream>
+#include <optional>
 #include <utility>
 #include <vector>
-#include <spot/kripke/kripke.hh>
 #include "kripke.hpp"
 
 namespace brainfuck
@@ -110,35 +108,37 @@ namespace brainfuck
         return this->memory.to_std_map();
     }
 
-    KState *KState::clone() const
-    {
-        // MemoryMap copies are O(1), so cloning a state is cheap.
-        return new KState(this->pc, this->mem_ptr, this->memory, this->remaining_stdin_chars);
-    }
-
     std::size_t KState::hash() const
     {
         return this->state_hash;
     }
 
-    int KState::compare(const spot::state *other) const
+    int KState::compare(const KState &other) const
     {
-        const KState *o = static_cast<const KState *>(other);
-
-        if (this->pc != o->pc)
-            return this->pc < o->pc ? -1 : 1;
-        if (this->mem_ptr != o->mem_ptr)
-            return this->mem_ptr < o->mem_ptr ? -1 : 1;
-        if (this->remaining_stdin_chars != o->remaining_stdin_chars)
+        if (this->pc != other.pc)
+            return this->pc < other.pc ? -1 : 1;
+        if (this->mem_ptr != other.mem_ptr)
+            return this->mem_ptr < other.mem_ptr ? -1 : 1;
+        if (this->remaining_stdin_chars != other.remaining_stdin_chars)
         {
             // An unrestricted input (no value) sorts before any bound.
             if (!this->remaining_stdin_chars.has_value())
                 return -1;
-            if (!o->remaining_stdin_chars.has_value())
+            if (!other.remaining_stdin_chars.has_value())
                 return 1;
-            return this->remaining_stdin_chars.value() < o->remaining_stdin_chars.value() ? -1 : 1;
+            return this->remaining_stdin_chars.value() < other.remaining_stdin_chars.value() ? -1 : 1;
         }
-        return this->memory.compare(o->memory);
+        return this->memory.compare(other.memory);
+    }
+
+    bool KState::operator==(const KState &other) const
+    {
+        return this->compare(other) == 0;
+    }
+
+    bool KState::operator!=(const KState &other) const
+    {
+        return !(*this == other);
     }
 
     void KState::update_hash()
@@ -151,12 +151,21 @@ namespace brainfuck
         this->state_hash = hash;
     }
 
-    KIterator::KIterator(const KState *state, const Program &prog, bdd cond, Folding folding)
-        : spot::kripke_succ_iterator(cond),
-          pc(state->get_instr_ptr()),
-          mem_ptr(state->get_mem_ptr()),
-          memory(state->get_memory_map()),
-          remaining_stdin_chars(state->get_remaining_stdin_chars()),
+    std::size_t KStateHash::operator()(const KState &state) const
+    {
+        return state.hash();
+    }
+
+    bool KStateEqual::operator()(const KState &left, const KState &right) const
+    {
+        return left == right;
+    }
+
+    KIterator::KIterator(const KState &state, const Program &prog, Folding folding)
+        : pc(state.get_instr_ptr()),
+          mem_ptr(state.get_mem_ptr()),
+          memory(state.get_memory_map()),
+          remaining_stdin_chars(state.get_remaining_stdin_chars()),
           writes_memory(false),
           pos(0)
     {
@@ -291,178 +300,71 @@ namespace brainfuck
         return this->pos >= this->possible_values.size();
     }
 
-    KState *KIterator::dst() const
+    KState KIterator::state() const
     {
         MemoryMap successor_memory = this->memory;
         if (this->writes_memory)
             successor_memory = this->memory.set(this->mem_ptr, this->possible_values[this->pos]);
-        return new KState(this->pc, this->mem_ptr, std::move(successor_memory), this->remaining_stdin_chars);
+        return KState(this->pc, this->mem_ptr, std::move(successor_memory), this->remaining_stdin_chars);
     }
 
-    Kripke::Kripke(Program program, const spot::bdd_dict_ptr &d, Folding folding,
-                   Observation observation)
-        : spot::kripke(d),
-          prog(std::move(program)),
-          folding(folding),
-          observation(observation),
-          cell_bdd(bdd_false()),
-          value_bdd(bdd_false()),
-          wrap_bdd(bdd_false()),
-          halt_bdd(bdd_false())
+    Kripke::Kripke(Program program, Folding folding, Observation observation)
+        : prog(std::move(program)), folding(folding), observation(observation)
     {
-        // The cell, value, wrap and halt atoms are only part of the state
-        // condition when a check asks for them. Registering them here maps the
-        // names in the analysis formula to the same BDD variables.
+    }
+
+    KState Kripke::initial_state() const
+    {
+        return KState(this->prog.io_model.get_chars_until_eof());
+    }
+
+    KIterator Kripke::successors(const KState &state) const
+    {
+        return KIterator(state, this->prog, this->folding);
+    }
+
+    bool Kripke::observes(const KState &state) const
+    {
         if (this->observation.visited_cell)
-        {
-            this->cell_bdd = bdd_ithvar(register_ap(CELL_VISIT_PROPOSITION));
-            // A visit check may exclude the end point, so it always needs the
-            // halt atom; a value check needs it only for a postcondition.
-            this->halt_bdd = bdd_ithvar(register_ap(HALT_PROPOSITION));
-        }
+            // The pointer position is part of the atom, so pointer runs must
+            // stay unfolded (see Folding::values).
+            return state.get_mem_ptr() == this->observation.visited_cell.value();
+
         if (this->observation.cell_test)
         {
-            this->value_bdd = bdd_ithvar(register_ap(CELL_VALUE_PROPOSITION));
-            if (this->observation.cell_test->on_halt)
-                this->halt_bdd = bdd_ithvar(register_ap(HALT_PROPOSITION));
-        }
-        if (this->observation.wrap_test)
-            this->wrap_bdd = bdd_ithvar(register_ap(CELL_WRAP_PROPOSITION));
-
-        // Register one atomic proposition per label **name**. A name may occur
-        // at several pointers, and it is one proposition that is true at each
-        // of them; building the literal per label-map entry would turn such a
-        // name into `name & !name` and make every pointer that carries it
-        // unlabelled (an unlabelled state is a dead end for the product, which
-        // silently turns every answer into a vacuous one).
-        struct LabelGroup
-        {
-            bdd condition;                  //!< proposition of one label name
-            std::set<instr_ptr_t> pointers; //!< every pointer that carries the name
-        };
-        std::vector<LabelGroup> labels;
-        std::map<std::string, std::size_t> group_of_name;
-        for (const auto &entry : this->prog.get_label_map())
-        {
-            auto found = group_of_name.find(entry.second);
-            if (found == group_of_name.end())
-            {
-                found = group_of_name.emplace(entry.second, labels.size()).first;
-                labels.push_back(LabelGroup{bdd_ithvar(register_ap(entry.second)), {}});
-            }
-            labels[found->second].pointers.insert(entry.first);
-        }
-
-        const instr_ptr_t pointers = this->prog.instr_count() + 1;
-        if (labels.empty())
-        {
-            // Without labels no state is distinguished. An observation still
-            // needs a condition, so its literal can be conjoined; otherwise
-            // keep the states inert instead of accepting everything.
-            if (this->observation.visited_cell || this->observation.cell_test ||
-                this->observation.wrap_test)
-                this->state_conditions.assign(pointers, bdd_true());
-            else
-                this->state_conditions.assign(pointers, bdd_false());
-            return;
-        }
-
-        // A state is labelled true exactly where its pointer carries a label
-        // name and false everywhere else, so the condition is a function of the
-        // pointer alone and can be built once here.
-        bdd no_label = bdd_true();
-        for (const auto &label : labels)
-            no_label &= !label.condition;
-
-        this->state_conditions.assign(pointers, no_label);
-
-        // Every pointer that carries at least one label gets its own condition:
-        // a name is true exactly at the pointers that carry it. The label map is
-        // ordered by pointer, so the distinct pointers are the first of each run
-        // of equal keys.
-        instr_ptr_t labelled_pc = 0;
-        bool have_pointer = false;
-        for (const auto &entry : this->prog.get_label_map())
-        {
-            if (have_pointer && entry.first == labelled_pc)
-                continue;
-            labelled_pc = entry.first;
-            have_pointer = true;
-
-            bdd condition = bdd_true();
-            for (const auto &label : labels)
-                condition &= label.pointers.count(labelled_pc) != 0 ? label.condition
-                                                                   : !label.condition;
-            this->state_conditions[labelled_pc] = condition;
-        }
-    }
-
-    KState *Kripke::get_init_state() const
-    {
-        return new KState(this->prog.io_model.get_chars_until_eof());
-    }
-
-    KIterator *Kripke::succ_iter(const spot::state *s) const
-    {
-        const KState *state = static_cast<const KState *>(s);
-        return new KIterator(state, this->prog, state_condition(state), this->folding);
-    }
-
-    bdd Kripke::state_condition(const spot::state *s) const
-    {
-        const KState *state = static_cast<const KState *>(s);
-        const instr_ptr_t pc = state->get_instr_ptr();
-        if (pc >= this->state_conditions.size())
-            return bdd_false();
-
-        bdd condition = this->state_conditions[pc];
-        if (this->observation.visited_cell)
-        {
-            // The pointer position is part of the condition, so pointer runs
-            // must stay unfolded (see Folding::values).
-            condition &= state->get_mem_ptr() == this->observation.visited_cell.value()
-                             ? this->cell_bdd
-                             : !this->cell_bdd;
-        }
-        if (this->observation.cell_test)
-        {
-            // The cell's content is part of the condition, so `+`/`-` runs must
-            // stay unfolded (see Folding::pointers). This is a function of the
-            // whole state, which is what Spot labels a state's transitions
-            // with, so successors that differ in their memory contents are fine.
+            // A cell's content is part of the atom, so `+`/`-` runs must stay
+            // unfolded (see Folding::pointers). A postcondition observes only
+            // the end point, because the halt literal is part of the atom.
             const CellTest &test = this->observation.cell_test.value();
-            condition &= cell_test_holds(test, state->get_memory_map().get(test.cell))
-                             ? this->value_bdd
-                             : !this->value_bdd;
+            if (test.on_halt && !this->prog.is_end(state.get_instr_ptr()))
+                return false;
+            return cell_test_holds(test, state.get_memory_map().get(test.cell));
         }
+
         if (this->observation.wrap_test)
-        {
-            // A wrap happens on the step *leaving* this state, which Spot labels
-            // with this condition, so the literal belongs to the state before
-            // the wrapping instruction. The step is one `+`/`-`, so value runs
-            // must stay unfolded (see Folding::pointers).
-            condition &= wrap_test_holds(this->prog, *state, this->observation.wrap_test.value())
-                             ? this->wrap_bdd
-                             : !this->wrap_bdd;
-        }
-        if (this->halt_bdd != bdd_false())
-        {
-            // No check observes the halt point when nothing registered the atom
-            // (a plain value check). Otherwise the end point stutters; excluding
-            // it is what makes an infinitely-often check mean "before halting",
-            // and a postcondition is only true there.
-            condition &= this->prog.is_end(pc) ? this->halt_bdd : !this->halt_bdd;
-        }
-        return condition;
+            // A wrap happens on the step *leaving* this state, so the atom
+            // belongs to the state before the wrapping instruction. The step is
+            // one `+`/`-`, so value runs must stay unfolded (see
+            // Folding::pointers).
+            return wrap_test_holds(this->prog, state, this->observation.wrap_test.value());
+
+        // Nothing is observed: a label check or `dot`, where the atom is the
+        // label itself and has no per-state cell part.
+        return false;
     }
 
-    std::string Kripke::format_state(const spot::state *s) const
+    const Program &Kripke::get_program() const
     {
-        const KState *state = static_cast<const KState *>(s);
-        std::ostringstream out;
-        out << "pc = " << state->get_instr_ptr()
-            << "; mp = " << state->get_mem_ptr()
-            << "\nhash = " << state->hash();
-        return out.str();
+        return this->prog;
+    }
+
+    Folding Kripke::get_folding() const
+    {
+        return this->folding;
+    }
+
+    const Observation &Kripke::get_observation() const
+    {
+        return this->observation;
     }
 }

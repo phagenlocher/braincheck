@@ -3,10 +3,10 @@
 #include <functional>
 #include <string>
 #include <iostream>
+#include <unordered_map>
+#include <vector>
 #include <argparse.hpp>
 #include <brainfuck.hpp>
-#include <spot/twaalgos/dot.hh>
-#include <spot/twaalgos/emptiness.hh>
 
 // ANSI escape sequences used for the user-facing output. Each macro is a
 // foreground colour; the _BOLD variants use the bright variant of the colour.
@@ -102,21 +102,21 @@ namespace
      *
      * A state represents a whole folded transition, so one step prints all
      * instructions that transition stands for. The trailing context starts
-     * behind the last cycle step and is not executed.
+     * behind the last cycle step and is not executed. A counterexample is
+     * always a lasso, so \c cycle is not empty here.
      */
-    void print_run(const bf::Program &prog, const spot::twa_run_ptr &run,
-                   bf::Folding folding, const std::optional<std::string> &highlight_label)
+    void print_run(const bf::Program &prog, const bf::Run &run, bf::Folding folding,
+                   const std::optional<std::string> &highlight_label)
     {
         bf::instr_ptr_t last_ptr = 0;
         std::cout << BLUE_BOLD;
-        for (auto step : run->prefix)
-            print_step(prog, static_cast<const bf::KState *>(step.s)->get_instr_ptr(), folding);
+        for (const bf::KState &state : run.prefix)
+            print_step(prog, state.get_instr_ptr(), folding);
         std::cout << RED_BOLD;
-        for (auto step : run->cycle)
+        for (const bf::KState &state : run.cycle)
         {
-            const auto *state = static_cast<const bf::KState *>(step.s);
-            print_step(prog, state->get_instr_ptr(), folding);
-            last_ptr = state->get_instr_ptr();
+            print_step(prog, state.get_instr_ptr(), folding);
+            last_ptr = state.get_instr_ptr();
         }
         std::cout << BLUE_BOLD;
         for (bf::instr_ptr_t i = step_end(prog, last_ptr, folding); true; i++)
@@ -198,33 +198,128 @@ namespace
 
     //! Prints a run up to the first state for which \a marker is non-empty.
     /**
-     * A witness for "some run ..." ends where the observed condition first
-     * holds, so the run is truncated there and the state is marked with the
-     * text \a marker returns for it; an empty string means "not that state".
-     * The rest of the lasso is not part of the answer.
+     * Both an existential witness ("some run reaches ...") and an event
+     * counterexample ("some run wraps ...") end where the observed condition
+     * first holds, so the run is truncated there and the state is marked with
+     * the text \a marker returns for it; an empty string means "not that
+     * state". The rest of the run is not part of the answer.
      */
-    void print_witness(const bf::Program &prog, const spot::twa_run_ptr &run,
-                       bf::Folding folding,
+    void print_truncated_run(const bf::Program &prog, const bf::Run &run, bf::Folding folding,
                        const std::function<std::string(const bf::KState *)> &marker)
     {
         std::cout << BLUE_BOLD;
         std::string mark;
-        const auto show = [&](const spot::twa_run::step &step)
+        const auto show = [&](const bf::KState &state)
         {
             if (!mark.empty())
                 return;
-            const auto *state = static_cast<const bf::KState *>(step.s);
-            print_step(prog, state->get_instr_ptr(), folding);
-            mark = marker(state);
+            print_step(prog, state.get_instr_ptr(), folding);
+            mark = marker(&state);
         };
-        for (auto step : run->prefix)
-            show(step);
+        for (const bf::KState &state : run.prefix)
+            show(state);
         if (mark.empty())
-            for (auto step : run->cycle)
-                show(step);
+            for (const bf::KState &state : run.cycle)
+                show(state);
         std::cout << YELLOW_BOLD;
         std::cout << "  <- " << mark;
         std::cout << RESET;
+    }
+
+    //! Escapes \a text for use inside a Graphviz node label.
+    std::string dot_escape(const std::string &text)
+    {
+        std::string escaped;
+        escaped.reserve(text.size());
+        for (const char character : text)
+        {
+            if (character == '"' || character == '\\')
+                escaped.push_back('\\');
+            escaped.push_back(character);
+        }
+        return escaped;
+    }
+
+    //! Every label written at \a pc as `done, loop`, or `(none)` without one.
+    std::string label_text(const bf::Program &prog, bf::instr_ptr_t pc)
+    {
+        const auto range = prog.get_label_map().equal_range(pc);
+        std::string text;
+        for (auto entry = range.first; entry != range.second; ++entry)
+        {
+            if (!text.empty())
+                text += ", ";
+            text += entry->second;
+        }
+        return text.empty() ? "(none)" : text;
+    }
+
+    //! Prints \a kripke as a Graphviz graph, one node per discovered state.
+    /**
+     * Breadth-first discovery gives stable node numbers, so the initial state
+     * is always node 0 and is entered through the invisible `I` node. The node
+     * label keeps the `pc = ...; mp = ...; hash = ...` lines and names every
+     * label written at the instruction pointer (`done`, `loop`, or `(none)`),
+     * so a node shows the labels that a `check reach` would see there (see
+     * `spec/state-space.md`).
+     */
+    void print_dot(const bf::Kripke &kripke)
+    {
+        const bf::Program &prog = kripke.get_program();
+
+        std::unordered_map<bf::KState, std::size_t, bf::KStateHash, bf::KStateEqual> index;
+        std::vector<bf::KState> states;
+        std::vector<std::vector<std::size_t>> edges;
+
+        const bf::KState start = kripke.initial_state();
+        index.emplace(start, 0);
+        states.push_back(start);
+        edges.emplace_back();
+
+        for (std::size_t current = 0; current < states.size(); current++)
+        {
+            bf::KIterator successors = kripke.successors(states[current]);
+            for (successors.first(); !successors.done(); successors.next())
+            {
+                const bf::KState next = successors.state();
+                const auto found = index.find(next);
+                std::size_t target;
+                if (found == index.end())
+                {
+                    target = states.size();
+                    index.emplace(next, target);
+                    states.push_back(next);
+                    edges.emplace_back();
+                }
+                else
+                {
+                    target = found->second;
+                }
+                edges[current].push_back(target);
+            }
+        }
+
+        std::cout << "digraph \"\" {" << std::endl;
+        std::cout << "  rankdir=LR" << std::endl;
+        std::cout << "  label=\"t\\n[all]\"" << std::endl;
+        std::cout << "  labelloc=\"t\"" << std::endl;
+        std::cout << "  node [shape=\"box\",style=\"rounded\",width=\"0.5\"]" << std::endl;
+        std::cout << "  I [label=\"\", style=invis, width=0]" << std::endl;
+        std::cout << "  I -> 0" << std::endl;
+
+        for (std::size_t current = 0; current < states.size(); current++)
+        {
+            const bf::KState &state = states[current];
+            std::cout << "  " << current
+                      << " [label=\"pc = " << state.get_instr_ptr()
+                      << "; mp = " << state.get_mem_ptr()
+                      << "\\nhash = " << state.hash()
+                      << "\\n" << dot_escape(label_text(prog, state.get_instr_ptr()))
+                      << "\"]" << std::endl;
+            for (const std::size_t target : edges[current])
+                std::cout << "  " << current << " -> " << target << " [label=\"\"]" << std::endl;
+        }
+        std::cout << "}" << std::endl;
     }
 }
 
@@ -242,15 +337,11 @@ ap::PrintFun pfun = [](std::string filename, bool without_label)
     prog.print(without_label);
 };
 
-//! `dot`: render the Kripke structure of the program as a dot graph.
+//! `dot`: render the state graph of the program as a dot graph.
 ap::DotFun dotfun = [](std::string filename, bf::MemoryModel memory_model, bool compress)
 {
     bf::Program prog = parse_bf_program(filename, memory_model);
-    auto k = std::make_shared<bf::Kripke>(
-        prog,
-        spot::make_bdd_dict(),
-        compress ? bf::Folding::straight_line : bf::Folding::none);
-    spot::print_dot(std::cout, k, "N");
+    print_dot(bf::Kripke(prog, compress ? bf::Folding::straight_line : bf::Folding::none));
 };
 
 //! `check reach`: report whether \a label is reached on every infinite run.
@@ -424,7 +515,7 @@ ap::ValueFun valuefun = [](
         std::cout << "Cell " << cell << " can " << (on_halt ? "hold " : "reach ")
                   << text << (on_halt ? " when the program halts:" : " on some run:");
         std::cout << std::endl;
-        print_witness(
+        print_truncated_run(
             prog, answer.run.value(), folding,
             [&prog, &test](const bf::KState *state) -> std::string
             {
@@ -445,18 +536,18 @@ ap::ValueFun valuefun = [](
     std::cout << RESET << std::endl;
 };
 
-//! `check overflow`: report whether a cell can wrap past its range.
+//! `check overflow`: report whether a cell ever wraps past its range.
 /**
  * A wrap is the `+` on a cell holding the cell width's maximum (overflow) or
- * the `-` on a cell holding zero (underflow). The observed state is the one
- * *before* the wrapping instruction, because Spot labels the transitions
- * leaving a state with that state's condition, so a printed witness ends on
- * the instruction that wraps.
+ * the `-` on a cell holding zero (underflow). The check verifies the safety
+ * property `no run ever wraps the cell`: a green answer is the one we want,
+ * and a run that wraps is printed as a counterexample, truncated on the
+ * wrapping instruction.
  *
- * The check is always existential: it asks whether *some* run wraps the cell
- * and prints that witness. `--direction` narrows the observation to one
- * direction; the default observes both and the witness marker says which one
- * was found (see `spec/cell-overflow.md`).
+ * The observed state is the one *before* the wrapping instruction, because the
+ * wrap is a property of the step leaving it. `--direction` narrows the
+ * observation to one direction; the default observes both and the counterexample
+ * marker says which one was found (see `spec/cell-overflow.md`).
  */
 ap::OverflowFun overflowfun = [](
     std::string filename, bf::mem_ptr_t cell, bf::WrapDirection direction,
@@ -485,15 +576,15 @@ ap::OverflowFun overflowfun = [](
     else if (direction == bf::WrapDirection::underflow)
         verb = "underflow";
     const bf::WrapTest test{cell, direction};
-    const std::optional<spot::twa_run_ptr> run = bf::check_overflow(prog, test);
+    const std::optional<bf::Run> counterexample = bf::check_overflow(prog, test);
 
-    if (run.has_value())
+    if (counterexample.has_value())
     {
-        std::cout << GREEN_BOLD;
-        std::cout << "Cell " << cell << " can " << verb << " on some run:";
+        std::cout << RED_BOLD;
+        std::cout << "There exists a run in which cell " << cell << " " << verb << "s:";
         std::cout << std::endl;
-        print_witness(
-            prog, run.value(), bf::Folding::pointers,
+        print_truncated_run(
+            prog, counterexample.value(), bf::Folding::pointers,
             [&prog, &test](const bf::KState *state) -> std::string
             {
                 return wrap_marker(prog, test, state);
@@ -501,7 +592,7 @@ ap::OverflowFun overflowfun = [](
     }
     else
     {
-        std::cout << RED_BOLD;
+        std::cout << GREEN_BOLD;
         std::cout << "Cell " << cell << " never " << verb << "s on any run.";
     }
     std::cout << RESET << std::endl;

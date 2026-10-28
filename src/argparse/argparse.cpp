@@ -6,7 +6,6 @@
 #include <CLI/CLI.hpp>
 #include <brainfuck.hpp>
 #include "argparse.hpp"
-#include <spot/misc/version.hh>
 
 namespace bf = brainfuck;
 
@@ -307,8 +306,7 @@ namespace argparse
             std::cout
                 << "braincheck pre alpha"
                 << std::endl
-                << "Running with Spot " << spot::version()
-                << " and CLI11 " << CLI11_VERSION
+                << "Running with CLI11 " << CLI11_VERSION
                 << std::endl;
             return 0;
         }

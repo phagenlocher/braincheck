@@ -5,8 +5,6 @@
 #include <map>
 #include <minunit.h>
 #include <brainfuck.hpp>
-#include <spot/twa/bdddict.hh>
-#include <spot/twaalgos/emptiness.hh>
 
 using namespace brainfuck;
 
@@ -451,7 +449,7 @@ MU_TEST(memory_map_ordering)
 
     mu_check(a.compare(a) == 0);
     mu_check(a.compare(b) != 0);
-    // Ordering has to be antisymmetric for Spot's state tables.
+    // Ordering has to be antisymmetric for the search's state table.
     mu_check((a.compare(b) < 0) != (b.compare(a) < 0));
     mu_check(a.compare(c) != 0);
     mu_check(c.compare(a) != 0);
@@ -517,8 +515,8 @@ MU_TEST(KState_hashing_basics)
     KState state_with_memory(0, 0, memory1);
     KState state_with_same_memory(0, 0, memory1);
     KState state_with_other_memory(0, 0, memory2);
-    mu_check(state_with_memory.compare(&state_with_same_memory) == 0);
-    mu_check(state_with_memory.compare(&state_with_other_memory) != 0);
+    mu_check(state_with_memory.compare(state_with_same_memory) == 0);
+    mu_check(state_with_memory.compare(state_with_other_memory) != 0);
     mu_check(
         KState(0, 0, empty_memory, std::make_optional(1)).hash() !=
         KState().hash());
@@ -538,14 +536,14 @@ MU_TEST(KState_compare_covers_memory)
     const KState c(0, 0, one, std::make_optional<std::size_t>(3));
 
     // Same pointers and the same input budget still differ in their memory.
-    mu_check(a.compare(&b) != 0);
-    mu_check((a.compare(&b) < 0) != (b.compare(&a) < 0));
+    mu_check(a.compare(b) != 0);
+    mu_check((a.compare(b) < 0) != (b.compare(a) < 0));
     // Equal states compare equal and hash equal.
-    mu_check(a.compare(&c) == 0);
+    mu_check(a.compare(c) == 0);
     mu_check(a.hash() == c.hash());
 }
 
-//! KState hash/compare agreement, which Spot's tables depend on.
+//! KState hash/compare agreement, which the search's hash table depends on.
 MU_TEST_SUITE(hashing)
 {
     MU_RUN_TEST(KState_hashing_basics);
@@ -667,50 +665,37 @@ MU_TEST(kripke_successors_follow_memory_model)
         &wrapping_source,
         MemoryModel(CellSize::EightBit, 4, true),
         IOModel());
-    spot::bdd_dict_ptr dict = spot::make_bdd_dict();
 
-    Kripke wrapping_kripke = Kripke(wrapping_prog, dict);
-    spot::state *wrapping_init = wrapping_kripke.get_init_state();
-    KIterator *wrapping_it = wrapping_kripke.succ_iter(wrapping_init);
-    mu_check(wrapping_it->first());
-    mu_check(!wrapping_it->done());
-    KState *wrapping_successor = wrapping_it->dst();
+    const Kripke wrapping_kripke(wrapping_prog);
+    KIterator wrapping_it = wrapping_kripke.successors(wrapping_kripke.initial_state());
+    mu_check(wrapping_it.first());
+    mu_check(!wrapping_it.done());
+    const KState wrapping_successor = wrapping_it.state();
     // Four cells and wrapping: left from 0 must reach the last cell.
-    mu_check(wrapping_successor->get_mem_ptr() == 3);
-    wrapping_successor->destroy();
-    delete wrapping_it;
-    wrapping_init->destroy();
+    mu_check(wrapping_successor.get_mem_ptr() == 3);
 
     std::istringstream clamped_source("<");
     Program clamped_prog = Program::parse_from_istream(
         &clamped_source,
         MemoryModel(CellSize::EightBit, 4, false),
         IOModel());
-    Kripke clamped_kripke = Kripke(clamped_prog, dict);
-    spot::state *clamped_init = clamped_kripke.get_init_state();
-    KIterator *clamped_it = clamped_kripke.succ_iter(clamped_init);
-    mu_check(clamped_it->first());
-    KState *clamped_successor = clamped_it->dst();
-    mu_check(clamped_successor->get_mem_ptr() == 0);
-    clamped_successor->destroy();
-    delete clamped_it;
-    clamped_init->destroy();
+    const Kripke clamped_kripke(clamped_prog);
+    KIterator clamped_it = clamped_kripke.successors(clamped_kripke.initial_state());
+    mu_check(clamped_it.first());
+    const KState clamped_successor = clamped_it.state();
+    mu_check(clamped_successor.get_mem_ptr() == 0);
 
     std::istringstream dec_source("-");
     Program dec_prog = Program::parse_from_istream(
         &dec_source,
         MemoryModel(CellSize::SixteenBit, 4, true),
         IOModel());
-    Kripke dec_kripke = Kripke(dec_prog, dict);
-    spot::state *dec_init = dec_kripke.get_init_state();
-    KIterator *dec_it = dec_kripke.succ_iter(dec_init);
-    mu_check(dec_it->first());
-    KState *dec_successor = dec_it->dst();
+    const Kripke dec_kripke(dec_prog);
+    KIterator dec_it = dec_kripke.successors(dec_kripke.initial_state());
+    mu_check(dec_it.first());
+    const KState dec_successor = dec_it.state();
     // Sixteen bit cells: 0 - 1 must wrap to 65535, not to 255.
-    mu_check(dec_successor->get_memory().at(0) == 65535);
-    dec_successor->destroy();
-    delete dec_it;
-    dec_init->destroy();
+    mu_check(dec_successor.get_memory().at(0) == 65535);
 }
 
 //! A read yields one successor per character, the last one included.
@@ -718,53 +703,42 @@ MU_TEST(kripke_explores_every_input)
 {
     std::istringstream source(",");
     Program prog = Program::parse_from_istream(&source, MemoryModel(), IOModel());
-    Kripke kripke = Kripke(prog, spot::make_bdd_dict());
-    spot::state *init = kripke.get_init_state();
-    KIterator *it = kripke.succ_iter(init);
+    const Kripke kripke(prog);
+    KIterator it = kripke.successors(kripke.initial_state());
 
     cell_value_t max_seen = 0;
     size_t count = 0;
-    for (it->first(); !it->done(); it->next())
+    for (it.first(); !it.done(); it.next())
     {
-        KState *successor = it->dst();
-        auto memory = successor->get_memory();
-        cell_value_t value = memory.count(0) > 0 ? memory.at(0) : 0;
+        const KState successor = it.state();
+        const auto memory = successor.get_memory();
+        const cell_value_t value = memory.count(0) > 0 ? memory.at(0) : 0;
         if (value > max_seen)
             max_seen = value;
         count++;
-        successor->destroy();
     }
     // One successor per possible input character, including the last one.
     mu_check(count == static_cast<size_t>(std::numeric_limits<io_char_t>::max()) + 1);
     mu_check(max_seen == std::numeric_limits<io_char_t>::max());
-
-    delete it;
-    init->destroy();
 }
 
-//! A state condition is true exactly where its pointer carries a label.
-MU_TEST(kripke_state_condition_follows_labels)
+//! A label lives at its instruction pointer, and `+` before it is one state.
+MU_TEST(kripke_label_lives_at_its_pointer)
 {
     std::istringstream source("+_done_");
     Program prog = Program::parse_from_istream(&source, MemoryModel(), IOModel());
-    Kripke kripke(prog, spot::make_bdd_dict());
+    const Kripke kripke(prog);
 
-    KState *init = kripke.get_init_state();
-    const bdd at_start = kripke.state_condition(init);
-    mu_check(at_start != bdd_false());
+    const KState init = kripke.initial_state();
+    mu_check(init.get_instr_ptr() == 0);
+    mu_check(!prog.has_label_at(init.get_instr_ptr(), "done"));
 
-    KIterator *it = kripke.succ_iter(init);
-    mu_check(it->first());
-    KState *successor = it->dst();
+    KIterator it = kripke.successors(init);
+    mu_check(it.first());
+    const KState successor = it.state();
     // The label sits behind the last instruction and is a state of its own.
-    mu_check(successor->get_instr_ptr() == 1);
-    const bdd at_label = kripke.state_condition(successor);
-    mu_check(at_label != bdd_false());
-    mu_check(at_label != at_start);
-
-    successor->destroy();
-    delete it;
-    init->destroy();
+    mu_check(successor.get_instr_ptr() == 1);
+    mu_check(prog.has_label_at(successor.get_instr_ptr(), "done"));
 }
 
 //! Only a read consumes the budget, and the successor reflects it.
@@ -772,29 +746,25 @@ MU_TEST(kripke_read_consumes_input_budget)
 {
     std::istringstream source(",,");
     Program prog = Program::parse_from_istream(&source, MemoryModel(), IOModel(1));
-    Kripke kripke(prog, spot::make_bdd_dict());
+    const Kripke kripke(prog);
 
-    KState *init = kripke.get_init_state();
-    mu_check(init->get_remaining_stdin_chars().has_value());
-    mu_check(init->get_remaining_stdin_chars().value() == 1);
+    const KState init = kripke.initial_state();
+    mu_check(init.get_remaining_stdin_chars().has_value());
+    mu_check(init.get_remaining_stdin_chars().value() == 1);
 
-    KIterator *it = kripke.succ_iter(init);
+    KIterator it = kripke.successors(init);
     std::size_t count = 0;
-    for (it->first(); !it->done(); it->next())
+    for (it.first(); !it.done(); it.next())
         count++;
     // Every possible character is a successor of the read.
     mu_check(count == static_cast<std::size_t>(std::numeric_limits<io_char_t>::max()) + 1);
 
-    it->first();
-    KState *after_read = it->dst();
-    mu_check(after_read->get_instr_ptr() == 1);
+    it.first();
+    const KState after_read = it.state();
+    mu_check(after_read.get_instr_ptr() == 1);
     // Only a read consumes input, so exactly one character is gone.
-    mu_check(after_read->get_remaining_stdin_chars().has_value());
-    mu_check(after_read->get_remaining_stdin_chars().value() == 0);
-
-    after_read->destroy();
-    delete it;
-    init->destroy();
+    mu_check(after_read.get_remaining_stdin_chars().has_value());
+    mu_check(after_read.get_remaining_stdin_chars().value() == 0);
 }
 
 //! A pinned input gives a read exactly one successor instead of 256.
@@ -805,46 +775,38 @@ MU_TEST(kripke_concrete_input_is_deterministic)
     io_model.set_input("ab");
     io_model.set_eof_char(7);
     Program prog = Program::parse_from_istream(&source, MemoryModel(), io_model);
-    Kripke kripke(prog, spot::make_bdd_dict());
+    const Kripke kripke(prog);
 
-    KState *init = kripke.get_init_state();
-    mu_check(init->get_remaining_stdin_chars().has_value());
-    mu_check(init->get_remaining_stdin_chars().value() == 2);
+    const KState init = kripke.initial_state();
+    mu_check(init.get_remaining_stdin_chars().has_value());
+    mu_check(init.get_remaining_stdin_chars().value() == 2);
 
     // A pinned read is deterministic: one successor, not the whole alphabet.
-    KIterator *first_read = kripke.succ_iter(init);
+    KIterator first_read = kripke.successors(init);
     std::size_t count = 0;
-    for (first_read->first(); !first_read->done(); first_read->next())
+    for (first_read.first(); !first_read.done(); first_read.next())
         count++;
     mu_check(count == 1);
 
-    first_read->first();
-    KState *after_first = first_read->dst();
-    mu_check(after_first->get_memory_map().get(0) == static_cast<cell_value_t>('a'));
-    mu_check(after_first->get_remaining_stdin_chars().value() == 1);
+    first_read.first();
+    const KState after_first = first_read.state();
+    mu_check(after_first.get_memory_map().get(0) == static_cast<cell_value_t>('a'));
+    mu_check(after_first.get_remaining_stdin_chars().value() == 1);
 
-    KIterator *second_read = kripke.succ_iter(after_first);
-    mu_check(second_read->first());
-    KState *after_second = second_read->dst();
-    mu_check(after_second->get_memory_map().get(0) == static_cast<cell_value_t>('b'));
-    mu_check(after_second->get_remaining_stdin_chars().value() == 0);
+    KIterator second_read = kripke.successors(after_first);
+    mu_check(second_read.first());
+    const KState after_second = second_read.state();
+    mu_check(after_second.get_memory_map().get(0) == static_cast<cell_value_t>('b'));
+    mu_check(after_second.get_remaining_stdin_chars().value() == 0);
 
     // Behind the last byte only the end-of-input policy decides the value.
-    KIterator *third_read = kripke.succ_iter(after_second);
-    mu_check(third_read->first());
-    mu_check(!third_read->next());
+    KIterator third_read = kripke.successors(after_second);
+    mu_check(third_read.first());
+    mu_check(!third_read.next());
     // next() moved past the only successor, so rewind before materialising it.
-    third_read->first();
-    KState *exhausted = third_read->dst();
-    mu_check(exhausted->get_memory_map().get(0) == 7);
-
-    exhausted->destroy();
-    delete third_read;
-    after_second->destroy();
-    delete second_read;
-    after_first->destroy();
-    delete first_read;
-    init->destroy();
+    third_read.first();
+    const KState exhausted = third_read.state();
+    mu_check(exhausted.get_memory_map().get(0) == 7);
 }
 
 //! The end point has exactly one successor, itself, with equal hash.
@@ -852,29 +814,22 @@ MU_TEST(kripke_end_state_stutters)
 {
     std::istringstream source("+");
     Program prog = Program::parse_from_istream(&source, MemoryModel(), IOModel());
-    Kripke kripke = Kripke(prog, spot::make_bdd_dict());
+    const Kripke kripke(prog);
 
-    KState *init = kripke.get_init_state();
-    KIterator *after_plus = kripke.succ_iter(init);
-    mu_check(after_plus->first());
-    KState *halted = after_plus->dst();
-    mu_check(prog.is_end(halted->get_instr_ptr()));
+    KIterator after_plus = kripke.successors(kripke.initial_state());
+    mu_check(after_plus.first());
+    const KState halted = after_plus.state();
+    mu_check(prog.is_end(halted.get_instr_ptr()));
 
     // The end point has exactly one successor: itself.
-    KIterator *stutter = kripke.succ_iter(halted);
-    mu_check(stutter->first());
-    mu_check(!stutter->done());
-    KState *again = stutter->dst();
-    mu_check(again->compare(halted) == 0);
-    mu_check(again->hash() == halted->hash());
-    stutter->next();
-    mu_check(stutter->done());
-
-    again->destroy();
-    delete stutter;
-    halted->destroy();
-    delete after_plus;
-    init->destroy();
+    KIterator stutter = kripke.successors(halted);
+    mu_check(stutter.first());
+    mu_check(!stutter.done());
+    const KState again = stutter.state();
+    mu_check(again == halted);
+    mu_check(again.hash() == halted.hash());
+    stutter.next();
+    mu_check(stutter.done());
 }
 
 //! A run of + and - becomes one transition with the net delta.
@@ -882,21 +837,16 @@ MU_TEST(kripke_folds_value_runs)
 {
     std::istringstream source("+++-");
     Program prog = Program::parse_from_istream(&source, MemoryModel(), IOModel());
-    Kripke kripke(prog, spot::make_bdd_dict());
+    const Kripke kripke(prog);
 
-    KState *init = kripke.get_init_state();
-    KIterator *it = kripke.succ_iter(init);
-    mu_check(it->first());
-    KState *successor = it->dst();
+    KIterator it = kripke.successors(kripke.initial_state());
+    mu_check(it.first());
+    const KState successor = it.state();
     // The whole run is one transition from pc 0 to pc 4.
-    mu_check(successor->get_instr_ptr() == 4);
-    mu_check(successor->get_memory().at(0) == 2);
-    it->next();
-    mu_check(it->done());
-
-    successor->destroy();
-    delete it;
-    init->destroy();
+    mu_check(successor.get_instr_ptr() == 4);
+    mu_check(successor.get_memory().at(0) == 2);
+    it.next();
+    mu_check(it.done());
 }
 
 //! A folded value run reduces its delta modulo the cell width.
@@ -905,19 +855,14 @@ MU_TEST(kripke_folds_value_runs_modulo_cell_width)
     std::istringstream source(std::string(256, '+'));
     Program prog = Program::parse_from_istream(
         &source, MemoryModel(CellSize::EightBit, 30000, true), IOModel());
-    Kripke kripke(prog, spot::make_bdd_dict());
+    const Kripke kripke(prog);
 
-    KState *init = kripke.get_init_state();
-    KIterator *it = kripke.succ_iter(init);
-    mu_check(it->first());
-    KState *successor = it->dst();
-    mu_check(successor->get_instr_ptr() == 256);
+    KIterator it = kripke.successors(kripke.initial_state());
+    mu_check(it.first());
+    const KState successor = it.state();
+    mu_check(successor.get_instr_ptr() == 256);
     // 256 increments cancel on an eight bit cell, and zero cells are absent.
-    mu_check(successor->get_memory().count(0) == 0);
-
-    successor->destroy();
-    delete it;
-    init->destroy();
+    mu_check(successor.get_memory().count(0) == 0);
 }
 
 //! A folded pointer run uses net displacement when wrapping, bounds when clamping.
@@ -926,33 +871,24 @@ MU_TEST(kripke_folds_pointer_runs)
     std::istringstream wrapping_source(">>>>>><<<<");
     Program wrapping_prog = Program::parse_from_istream(
         &wrapping_source, MemoryModel(CellSize::EightBit, 4, true), IOModel());
-    Kripke wrapping_kripke(wrapping_prog, spot::make_bdd_dict());
-    KState *wrapping_init = wrapping_kripke.get_init_state();
-    KIterator *wrapping_it = wrapping_kripke.succ_iter(wrapping_init);
-    mu_check(wrapping_it->first());
-    KState *wrapping_successor = wrapping_it->dst();
+    const Kripke wrapping_kripke(wrapping_prog);
+    KIterator wrapping_it = wrapping_kripke.successors(wrapping_kripke.initial_state());
+    mu_check(wrapping_it.first());
+    const KState wrapping_successor = wrapping_it.state();
     // Six rights and four lefts: net two on a wrapping tape.
-    mu_check(wrapping_successor->get_instr_ptr() == 10);
-    mu_check(wrapping_successor->get_mem_ptr() == 2);
+    mu_check(wrapping_successor.get_instr_ptr() == 10);
+    mu_check(wrapping_successor.get_mem_ptr() == 2);
 
     std::istringstream clamped_source(">>><");
     Program clamped_prog = Program::parse_from_istream(
         &clamped_source, MemoryModel(CellSize::EightBit, 3, false), IOModel());
-    Kripke clamped_kripke(clamped_prog, spot::make_bdd_dict());
-    KState *clamped_init = clamped_kripke.get_init_state();
-    KIterator *clamped_it = clamped_kripke.succ_iter(clamped_init);
-    mu_check(clamped_it->first());
-    KState *clamped_successor = clamped_it->dst();
+    const Kripke clamped_kripke(clamped_prog);
+    KIterator clamped_it = clamped_kripke.successors(clamped_kripke.initial_state());
+    mu_check(clamped_it.first());
+    const KState clamped_successor = clamped_it.state();
     // The run saturates at the tape edge, so its net displacement is wrong.
-    mu_check(clamped_successor->get_instr_ptr() == 4);
-    mu_check(clamped_successor->get_mem_ptr() == 1);
-
-    wrapping_successor->destroy();
-    delete wrapping_it;
-    wrapping_init->destroy();
-    clamped_successor->destroy();
-    delete clamped_it;
-    clamped_init->destroy();
+    mu_check(clamped_successor.get_instr_ptr() == 4);
+    mu_check(clamped_successor.get_mem_ptr() == 1);
 }
 
 //! Folding never crosses a label, so the labelled pointer stays a state.
@@ -960,28 +896,22 @@ MU_TEST(kripke_folding_keeps_labelled_block_boundaries)
 {
     std::istringstream source("++_l_++");
     Program prog = Program::parse_from_istream(&source, MemoryModel(), IOModel());
-    Kripke kripke(prog, spot::make_bdd_dict());
+    const Kripke kripke(prog);
 
-    KState *init = kripke.get_init_state();
-    const bdd start_condition = kripke.state_condition(init);
+    const KState init = kripke.initial_state();
+    mu_check(!prog.has_label_at(init.get_instr_ptr(), "l"));
 
-    KIterator *it = kripke.succ_iter(init);
-    mu_check(it->first());
-    KState *labelled = it->dst();
-    mu_check(labelled->get_instr_ptr() == 2);
+    KIterator it = kripke.successors(init);
+    mu_check(it.first());
+    const KState labelled = it.state();
     // The label between the two runs is a state of its own.
-    mu_check(kripke.state_condition(labelled) != start_condition);
+    mu_check(labelled.get_instr_ptr() == 2);
+    mu_check(prog.has_label_at(labelled.get_instr_ptr(), "l"));
 
-    KIterator *after = kripke.succ_iter(labelled);
-    mu_check(after->first());
-    KState *end = after->dst();
-    mu_check(end->get_instr_ptr() == 4);
-
-    end->destroy();
-    delete after;
-    labelled->destroy();
-    delete it;
-    init->destroy();
+    KIterator after = kripke.successors(labelled);
+    mu_check(after.first());
+    const KState end = after.state();
+    mu_check(end.get_instr_ptr() == 4);
 }
 
 //! Folding preserves the interpreted run and only shortens the state count.
@@ -995,84 +925,61 @@ MU_TEST(kripke_folding_preserves_the_unique_run)
     const cell_value_t interpreted_zero = prog.memory_model.get_value(0);
     const cell_value_t interpreted_one = prog.memory_model.get_value(1);
 
-    Kripke folded(prog, spot::make_bdd_dict(), Folding::straight_line);
-    Kripke plain(prog, spot::make_bdd_dict(), Folding::none);
+    const Kripke folded(prog, Folding::straight_line);
+    const Kripke plain(prog, Folding::none);
 
     // Follows the unique run to the end, counting transitions.
-    const auto follow = [&prog](Kripke &kripke, std::size_t &steps, KState *&end)
+    const auto follow = [&prog](const Kripke &kripke, std::size_t &steps)
     {
-        end = kripke.get_init_state();
+        KState end = kripke.initial_state();
         steps = 0;
-        while (!prog.is_end(end->get_instr_ptr()) && steps < 1000)
+        while (!prog.is_end(end.get_instr_ptr()) && steps < 1000)
         {
-            KIterator *it = kripke.succ_iter(end);
-            if (!it->first())
-            {
-                delete it;
+            KIterator it = kripke.successors(end);
+            if (!it.first())
                 break;
-            }
-            KState *next = it->dst();
-            delete it;
-            end->destroy();
-            end = next;
+            end = it.state();
             steps++;
         }
+        return end;
     };
 
     std::size_t folded_steps = 0;
     std::size_t plain_steps = 0;
-    KState *folded_end = nullptr;
-    KState *plain_end = nullptr;
-    follow(folded, folded_steps, folded_end);
-    follow(plain, plain_steps, plain_end);
+    const KState folded_end = follow(folded, folded_steps);
+    const KState plain_end = follow(plain, plain_steps);
 
-    mu_check(prog.is_end(folded_end->get_instr_ptr()));
+    mu_check(prog.is_end(folded_end.get_instr_ptr()));
     mu_check(folded_steps < plain_steps);
-    mu_check(folded_end->compare(plain_end) == 0);
+    mu_check(folded_end == plain_end);
 
-    const auto cells = folded_end->get_memory();
-    mu_check(folded_end->get_mem_ptr() == interpreted_pointer);
+    const auto cells = folded_end.get_memory();
+    mu_check(folded_end.get_mem_ptr() == interpreted_pointer);
     mu_check((cells.count(0) > 0 ? cells.at(0) : 0) == interpreted_zero);
     mu_check((cells.count(1) > 0 ? cells.at(1) : 0) == interpreted_one);
-
-    folded_end->destroy();
-    plain_end->destroy();
 }
 
-//! A label name that occurs at several pointers is one proposition.
+//! A label name at several pointers counts at each of them.
 /**
- * Building the literal per label-map entry would evaluate to `l & !l` at every
- * pointer that carries the name, which makes those states condition-less dead
- * ends and every analysis vacuously true.
+ * A repeated name must count at every pointer carrying it; the search looks
+ * the name up per state, so the invariant is that neither occurrence is lost.
  */
-MU_TEST(kripke_repeated_label_name_is_one_proposition)
+MU_TEST(kripke_repeated_label_name_is_at_every_pointer)
 {
     std::istringstream source("_l_>+_l_");
     Program prog = Program::parse_from_istream(&source, MemoryModel(), IOModel());
-    Kripke kripke(prog, spot::make_bdd_dict());
 
-    const std::map<mem_ptr_t, cell_value_t> empty;
-    const KState first(0, 0, empty, std::nullopt);
-    const KState middle(1, 0, empty, std::nullopt);
-    const KState second(2, 0, empty, std::nullopt);
-
-    const bdd first_cond = kripke.state_condition(&first);
-    const bdd middle_cond = kripke.state_condition(&middle);
-    const bdd second_cond = kripke.state_condition(&second);
-    mu_check(first_cond != bdd_false());
-    mu_check(middle_cond != bdd_false());
-    mu_check(second_cond != bdd_false());
-    // Both labelled pointers carry the same name, the interior one does not.
-    mu_check(first_cond == second_cond);
-    mu_check(first_cond != middle_cond);
+    mu_check(prog.has_label_at(0, "l"));
+    mu_check(!prog.has_label_at(1, "l"));
+    mu_check(prog.has_label_at(2, "l"));
 }
 
-//! State generation, label conditions, input handling and folding.
+//! State generation, label lookup, input handling and folding.
 MU_TEST_SUITE(kripke)
 {
     MU_RUN_TEST(kripke_successors_follow_memory_model);
     MU_RUN_TEST(kripke_explores_every_input);
-    MU_RUN_TEST(kripke_state_condition_follows_labels);
+    MU_RUN_TEST(kripke_label_lives_at_its_pointer);
     MU_RUN_TEST(kripke_read_consumes_input_budget);
     MU_RUN_TEST(kripke_concrete_input_is_deterministic);
     MU_RUN_TEST(kripke_end_state_stutters);
@@ -1081,7 +988,7 @@ MU_TEST_SUITE(kripke)
     MU_RUN_TEST(kripke_folds_pointer_runs);
     MU_RUN_TEST(kripke_folding_keeps_labelled_block_boundaries);
     MU_RUN_TEST(kripke_folding_preserves_the_unique_run);
-    MU_RUN_TEST(kripke_repeated_label_name_is_one_proposition);
+    MU_RUN_TEST(kripke_repeated_label_name_is_at_every_pointer);
 }
 
 //! A label that every run reaches is reported as reached.
@@ -1398,29 +1305,27 @@ MU_TEST(check_visit_duplicate_label_name)
 {
     std::istringstream source("_l_+_l_");
     Program prog = Program::parse_from_istream(&source, MemoryModel(), IOModel());
-    // Nothing moves to cell 1, so a counterexample must be found. With a
-    // condition-less initial state the product would be empty instead.
+    // Nothing moves to cell 1, so a counterexample must be found. The
+    // repeated name must not hide the states that carry it.
     mu_check(check_visit(prog, 1, VisitKind::at_least_once).has_value());
     mu_check(!check_visit(prog, 0, VisitKind::at_least_once).has_value());
 }
 
-//! A tracked cell changes the state condition when only the pointer moves.
-MU_TEST(kripke_cell_condition_depends_on_mem_ptr)
+//! A visit observation follows the memory pointer.
+MU_TEST(kripke_visit_observation_follows_mem_ptr)
 {
     std::istringstream source("+");
     Program prog = Program::parse_from_istream(&source, MemoryModel(), IOModel());
-    Kripke kripke(prog, spot::make_bdd_dict(), Folding::values,
-                  Observation{0, std::nullopt, std::nullopt});
+    Observation observation;
+    observation.visited_cell = 0;
+    const Kripke kripke(prog, Folding::values, observation);
 
     const std::map<mem_ptr_t, cell_value_t> empty;
     const KState on_cell(0, 0, empty, std::nullopt);
     const KState off_cell(0, 1, empty, std::nullopt);
-    const bdd here = kripke.state_condition(&on_cell);
-    const bdd there = kripke.state_condition(&off_cell);
-    mu_check(here != bdd_false());
-    mu_check(there != bdd_false());
     // Same pc and same non-end point, but the pointer is on a different cell.
-    mu_check(here != there);
+    mu_check(kripke.observes(on_cell));
+    mu_check(!kripke.observes(off_cell));
 }
 
 //! Folding::values keeps every pointer move as its own state.
@@ -1429,37 +1334,27 @@ MU_TEST(kripke_values_folding_keeps_pointer_states)
     std::istringstream source(">>");
     Program prog = Program::parse_from_istream(&source, MemoryModel(), IOModel());
 
-    Kripke values(prog, spot::make_bdd_dict(), Folding::values);
-    KState *init = values.get_init_state();
-    KIterator *first_it = values.succ_iter(init);
-    mu_check(first_it->first());
-    KState *first = first_it->dst();
-    mu_check(first->get_instr_ptr() == 1);
-    mu_check(first->get_mem_ptr() == 1);
+    const Kripke values(prog, Folding::values);
+    const KState init = values.initial_state();
+    KIterator first_it = values.successors(init);
+    mu_check(first_it.first());
+    const KState first = first_it.state();
+    mu_check(first.get_instr_ptr() == 1);
+    mu_check(first.get_mem_ptr() == 1);
 
-    KIterator *second_it = values.succ_iter(first);
-    mu_check(second_it->first());
-    KState *second = second_it->dst();
-    mu_check(second->get_instr_ptr() == 2);
-    mu_check(second->get_mem_ptr() == 2);
+    KIterator second_it = values.successors(first);
+    mu_check(second_it.first());
+    const KState second = second_it.state();
+    mu_check(second.get_instr_ptr() == 2);
+    mu_check(second.get_mem_ptr() == 2);
 
     // Folding::straight_line still collapses both moves into one transition.
-    Kripke straight(prog, spot::make_bdd_dict(), Folding::straight_line);
-    KState *straight_init = straight.get_init_state();
-    KIterator *straight_it = straight.succ_iter(straight_init);
-    mu_check(straight_it->first());
-    KState *straight_end = straight_it->dst();
-    mu_check(straight_end->get_instr_ptr() == 2);
-    mu_check(straight_end->get_mem_ptr() == 2);
-
-    straight_end->destroy();
-    delete straight_it;
-    straight_init->destroy();
-    second->destroy();
-    delete second_it;
-    first->destroy();
-    delete first_it;
-    init->destroy();
+    const Kripke straight(prog, Folding::straight_line);
+    KIterator straight_it = straight.successors(straight.initial_state());
+    mu_check(straight_it.first());
+    const KState straight_end = straight_it.state();
+    mu_check(straight_end.get_instr_ptr() == 2);
+    mu_check(straight_end.get_mem_ptr() == 2);
 }
 
 //! Folding::values still folds + and - runs, because they keep the pointer.
@@ -1467,21 +1362,15 @@ MU_TEST(kripke_values_folding_folds_value_runs)
 {
     std::istringstream source("+++>");
     Program prog = Program::parse_from_istream(&source, MemoryModel(), IOModel());
-    Kripke kripke(prog, spot::make_bdd_dict(), Folding::values);
+    const Kripke kripke(prog, Folding::values);
 
-    KState *init = kripke.get_init_state();
-    KIterator *it = kripke.succ_iter(init);
-    mu_check(it->first());
-    KState *successor = it->dst();
-    mu_check(successor->get_instr_ptr() == 3);
-    mu_check(successor->get_mem_ptr() == 0);
-    mu_check(successor->get_memory_map().get(0) == 3);
-
-    successor->destroy();
-    delete it;
-    init->destroy();
+    KIterator it = kripke.successors(kripke.initial_state());
+    mu_check(it.first());
+    const KState successor = it.state();
+    mu_check(successor.get_instr_ptr() == 3);
+    mu_check(successor.get_mem_ptr() == 0);
+    mu_check(successor.get_memory_map().get(0) == 3);
 }
-
 //! Cell visitation checks and the folding/condition support they need.
 MU_TEST_SUITE(cell_visits)
 {
@@ -1493,7 +1382,7 @@ MU_TEST_SUITE(cell_visits)
     MU_RUN_TEST(check_visit_respects_input);
     MU_RUN_TEST(check_visit_folding_independent);
     MU_RUN_TEST(check_visit_duplicate_label_name);
-    MU_RUN_TEST(kripke_cell_condition_depends_on_mem_ptr);
+    MU_RUN_TEST(kripke_visit_observation_follows_mem_ptr);
     MU_RUN_TEST(kripke_values_folding_keeps_pointer_states);
     MU_RUN_TEST(kripke_values_folding_folds_value_runs);
 }
@@ -1519,45 +1408,44 @@ namespace
 
     //! True when some state of \a run satisfies \a test.
     /**
-     * A value check returns either a counterexample or a witness lasso; this
+     * A value check returns either a counterexample or a witness run; this
      * scans both parts for a state that the test accepts, so a test can assert
      * that the printed run really supports the answer.
      */
-    bool run_satisfies(const Program &prog, const spot::twa_run_ptr &run, const CellTest &test)
+    bool run_satisfies(const Program &prog, const Run &run, const CellTest &test)
     {
-        const auto hit = [&prog, &test](const spot::twa_run::step &step)
+        const auto hit = [&prog, &test](const KState &state)
         {
-            const auto *state = static_cast<const KState *>(step.s);
-            if (test.on_halt && !prog.is_end(state->get_instr_ptr()))
+            if (test.on_halt && !prog.is_end(state.get_instr_ptr()))
                 return false;
-            return cell_test_holds(test, state->get_memory_map().get(test.cell));
+            return cell_test_holds(test, state.get_memory_map().get(test.cell));
         };
-        for (const auto &step : run->prefix)
-            if (hit(step))
+        for (const KState &state : run.prefix)
+            if (hit(state))
                 return true;
-        for (const auto &step : run->cycle)
-            if (hit(step))
+        for (const KState &state : run.cycle)
+            if (hit(state))
                 return true;
         return false;
     }
 
     //! True when some state of \a run wraps \a test's cell on its next step.
     /**
-     * A wrap check returns either a counterexample or a witness lasso; this
-     * scans both parts for the state before the wrapping step, so a test can
-     * assert that the printed run really supports the answer.
+     * A wrap check returns a counterexample run; this scans both parts for the
+     * state before the wrapping step, so a test can assert that the printed run
+     * really supports the answer.
      */
-    bool run_wraps(const Program &prog, const spot::twa_run_ptr &run, const WrapTest &test)
+    bool run_wraps(const Program &prog, const Run &run, const WrapTest &test)
     {
-        const auto hit = [&prog, &test](const spot::twa_run::step &step)
+        const auto hit = [&prog, &test](const KState &state)
         {
-            return wrap_test_holds(prog, *static_cast<const KState *>(step.s), test);
+            return wrap_test_holds(prog, state, test);
         };
-        for (const auto &step : run->prefix)
-            if (hit(step))
+        for (const KState &state : run.prefix)
+            if (hit(state))
                 return true;
-        for (const auto &step : run->cycle)
-            if (hit(step))
+        for (const KState &state : run.cycle)
+            if (hit(state))
                 return true;
         return false;
     }
@@ -1653,9 +1541,9 @@ MU_TEST(check_value_any_run_finds_the_run)
 
 //! Only a pinned input byte makes the value unavoidable.
 /**
- * The symbolic case also guards that a state condition may look at the memory
+ * The symbolic case also guards that the observed atom may look at the memory
  * contents: the read's successors differ only in the byte they store, and each
- * of them must get its own condition.
+ * of them must be evaluated on its own contents.
  */
 MU_TEST(check_value_respects_input)
 {
@@ -1676,9 +1564,8 @@ MU_TEST(check_value_respects_input)
 
 //! A repeated label name must not turn value answers vacuous.
 /**
- * `echo.bf` names both of its read states `read`. Building the label literal
- * per label-map entry used to make the initial state condition-less, which
- * turned both answers into vacuous ones instead of finding the byte.
+ * `echo.bf` names both of its read states `read`. Every occurrence of a name
+ * counts, so the analysis must still find the state that holds the byte.
  */
 MU_TEST(check_value_duplicate_label_name)
 {
@@ -1736,26 +1623,23 @@ MU_TEST(check_value_on_halt_witness_ends_at_halt)
     mu_check(run_satisfies(prog.value(), answer.run.value(), test));
 }
 
-//! A value condition is a function of the content, not of the pointer.
-MU_TEST(kripke_value_condition_depends_on_memory)
+//! A value observation is a function of the content, not of the pointer.
+MU_TEST(kripke_value_observation_follows_memory)
 {
     const auto prog = parse_or_nothing("+");
     mu_check(prog.has_value());
-    Kripke kripke(prog.value(), spot::make_bdd_dict(), Folding::pointers,
-                  Observation{std::nullopt, CellTest{0, Comparison::eq, 1, false},
-                              std::nullopt});
+    Observation observation;
+    observation.cell_test = CellTest{0, Comparison::eq, 1, false};
+    const Kripke kripke(prog.value(), Folding::pointers, observation);
 
     const std::map<mem_ptr_t, cell_value_t> empty;
     const std::map<mem_ptr_t, cell_value_t> one{{0, 1}};
     const KState unsatisfied(0, 0, empty, std::nullopt);
     const KState satisfied(0, 0, one, std::nullopt);
 
-    const bdd unsatisfied_cond = kripke.state_condition(&unsatisfied);
-    const bdd satisfied_cond = kripke.state_condition(&satisfied);
-    mu_check(unsatisfied_cond != bdd_false());
-    mu_check(satisfied_cond != bdd_false());
-    // Same pc and same pointer, different content: the conditions differ.
-    mu_check(unsatisfied_cond != satisfied_cond);
+    // Same pc and same pointer, different content: the observation differs.
+    mu_check(!kripke.observes(unsatisfied));
+    mu_check(kripke.observes(satisfied));
 }
 
 //! Folding::pointers folds pointer runs and keeps every value state.
@@ -1763,37 +1647,27 @@ MU_TEST(kripke_pointers_folding_keeps_value_states)
 {
     const auto prog = parse_or_nothing("++>>");
     mu_check(prog.has_value());
-    Kripke folded(prog.value(), spot::make_bdd_dict(), Folding::pointers);
+    const Kripke folded(prog.value(), Folding::pointers);
 
-    KState *init = folded.get_init_state();
-    KIterator *first_it = folded.succ_iter(init);
-    mu_check(first_it->first());
-    KState *first = first_it->dst();
-    mu_check(first->get_instr_ptr() == 1);
-    mu_check(first->get_memory_map().get(0) == 1);
+    KIterator first_it = folded.successors(folded.initial_state());
+    mu_check(first_it.first());
+    const KState first = first_it.state();
+    mu_check(first.get_instr_ptr() == 1);
+    mu_check(first.get_memory_map().get(0) == 1);
 
-    KIterator *second_it = folded.succ_iter(first);
-    mu_check(second_it->first());
-    KState *second = second_it->dst();
-    mu_check(second->get_instr_ptr() == 2);
-    mu_check(second->get_memory_map().get(0) == 2);
+    KIterator second_it = folded.successors(first);
+    mu_check(second_it.first());
+    const KState second = second_it.state();
+    mu_check(second.get_instr_ptr() == 2);
+    mu_check(second.get_memory_map().get(0) == 2);
 
     // The `>>` run is one transition, two cells of displacement.
-    KIterator *third_it = folded.succ_iter(second);
-    mu_check(third_it->first());
-    KState *third = third_it->dst();
-    mu_check(third->get_instr_ptr() == 4);
-    mu_check(third->get_mem_ptr() == 2);
-
-    third->destroy();
-    delete third_it;
-    second->destroy();
-    delete second_it;
-    first->destroy();
-    delete first_it;
-    init->destroy();
+    KIterator third_it = folded.successors(second);
+    mu_check(third_it.first());
+    const KState third = third_it.state();
+    mu_check(third.get_instr_ptr() == 4);
+    mu_check(third.get_mem_ptr() == 2);
 }
-
 //! Cell value checks and the folding/condition support they need.
 MU_TEST_SUITE(cell_values)
 {
@@ -1807,11 +1681,11 @@ MU_TEST_SUITE(cell_values)
     MU_RUN_TEST(check_value_duplicate_label_name);
     MU_RUN_TEST(check_value_on_halt);
     MU_RUN_TEST(check_value_on_halt_witness_ends_at_halt);
-    MU_RUN_TEST(kripke_value_condition_depends_on_memory);
+    MU_RUN_TEST(kripke_value_observation_follows_memory);
     MU_RUN_TEST(kripke_pointers_folding_keeps_value_states);
 }
 
-//! The increment that passes the cell maximum is an overflow.
+//! The increment that passes the cell maximum is an overflow counterexample.
 MU_TEST(check_overflow_increment_at_max)
 {
     const WrapTest overflow{0, WrapDirection::overflow};
@@ -1819,9 +1693,9 @@ MU_TEST(check_overflow_increment_at_max)
     // 255 increments reach the maximum, the 256th wraps to zero.
     const auto wrapping = parse_or_nothing(std::string(256, '+'));
     mu_check(wrapping.has_value());
-    const auto witness = check_overflow(wrapping.value(), overflow);
-    mu_check(witness.has_value());
-    mu_check(run_wraps(wrapping.value(), witness.value(), overflow));
+    const auto counterexample = check_overflow(wrapping.value(), overflow);
+    mu_check(counterexample.has_value());
+    mu_check(run_wraps(wrapping.value(), counterexample.value(), overflow));
 
     // 255 increments stop at the maximum: the cell never wraps.
     const auto stopping = parse_or_nothing(std::string(255, '+'));
@@ -1835,9 +1709,9 @@ MU_TEST(check_overflow_underflow)
     const auto prog = parse_or_nothing("-");
     mu_check(prog.has_value());
     const WrapTest underflow{0, WrapDirection::underflow};
-    const auto witness = check_overflow(prog.value(), underflow);
-    mu_check(witness.has_value());
-    mu_check(run_wraps(prog.value(), witness.value(), underflow));
+    const auto counterexample = check_overflow(prog.value(), underflow);
+    mu_check(counterexample.has_value());
+    mu_check(run_wraps(prog.value(), counterexample.value(), underflow));
 
     // A `-` is not a `+`, so the same program never overflows.
     mu_check(!check_overflow(prog.value(), WrapTest{0, WrapDirection::overflow}).has_value());
@@ -1846,7 +1720,7 @@ MU_TEST(check_overflow_underflow)
     mu_check(check_overflow(prog.value(), WrapTest{0, WrapDirection::both}).has_value());
 }
 
-//! An ordinary run never wraps, so there is no witness at all.
+//! An ordinary run never wraps, so the statement holds and nothing is printed.
 MU_TEST(check_overflow_without_wrap)
 {
     const auto prog = parse_or_nothing("+++");
@@ -1927,19 +1801,19 @@ MU_TEST(check_overflow_sees_through_pointer_folding)
     const auto prog = parse_or_nothing(">>>" + std::string(256, '+'), tape);
     mu_check(prog.has_value());
     const WrapTest overflow{3, WrapDirection::overflow};
-    const auto witness = check_overflow(prog.value(), overflow);
-    mu_check(witness.has_value());
-    mu_check(run_wraps(prog.value(), witness.value(), overflow));
+    const auto counterexample = check_overflow(prog.value(), overflow);
+    mu_check(counterexample.has_value());
+    mu_check(run_wraps(prog.value(), counterexample.value(), overflow));
 }
 
-//! The wrap condition is true in the state before the wrapping instruction.
-MU_TEST(kripke_wrap_condition_follows_state)
+//! The wrap observation is true in the state before the wrapping instruction.
+MU_TEST(kripke_wrap_observation_follows_state)
 {
     const auto prog = parse_or_nothing("+-");
     mu_check(prog.has_value());
-    Kripke kripke(prog.value(), spot::make_bdd_dict(), Folding::pointers,
-                  Observation{std::nullopt, std::nullopt,
-                              WrapTest{0, WrapDirection::overflow}});
+    Observation observation;
+    observation.wrap_test = WrapTest{0, WrapDirection::overflow};
+    const Kripke kripke(prog.value(), Folding::pointers, observation);
 
     const std::map<mem_ptr_t, cell_value_t> empty;
     const std::map<mem_ptr_t, cell_value_t> maximum{{0, 255}};
@@ -1948,12 +1822,10 @@ MU_TEST(kripke_wrap_condition_follows_state)
     const KState dec_at_max(1, 0, maximum, std::nullopt); // `-` on 255: no overflow
     const KState moved(0, 1, empty, std::nullopt);        // `+` on another cell
 
-    const bdd wrapping = kripke.state_condition(&at_max);
-    mu_check(wrapping != bdd_false());
-    // Without labels the atom is the only conjunct, so the other states negate it.
-    mu_check(wrapping != kripke.state_condition(&at_zero));
-    mu_check(wrapping != kripke.state_condition(&dec_at_max));
-    mu_check(kripke.state_condition(&at_zero) == kripke.state_condition(&moved));
+    mu_check(kripke.observes(at_max));
+    mu_check(!kripke.observes(at_zero));
+    mu_check(!kripke.observes(dec_at_max));
+    mu_check(!kripke.observes(moved));
 }
 
 //! Overflow and underflow checks and the folding/condition support they need.
@@ -1967,7 +1839,72 @@ MU_TEST_SUITE(cell_overflows)
     MU_RUN_TEST(check_overflow_is_per_cell);
     MU_RUN_TEST(check_overflow_respects_input);
     MU_RUN_TEST(check_overflow_sees_through_pointer_folding);
-    MU_RUN_TEST(kripke_wrap_condition_follows_state);
+    MU_RUN_TEST(kripke_wrap_observation_follows_state);
+}
+
+//! The existential search returns a shortest witness path.
+MU_TEST(search_eventually_is_shortest)
+{
+    std::istringstream source("+++++");
+    Program prog = Program::parse_from_istream(&source, MemoryModel(), IOModel());
+    const Kripke kripke(prog, Folding::pointers);
+
+    const auto run = search_eventually(
+        kripke,
+        [](const KState &state) { return state.get_memory_map().get(0) == 2; });
+    mu_check(run.has_value());
+    // 0, 1, 2: the shortest path to the first state that holds 2.
+    mu_check(run.value().prefix.size() == 3);
+    mu_check(run.value().cycle.empty());
+    mu_check(run.value().prefix.back().get_memory_map().get(0) == 2);
+}
+
+//! A counterexample lasso really closes: its last state leads back to the first.
+MU_TEST(search_always_closes_its_cycle)
+{
+    std::istringstream source("+[><]");
+    Program prog = Program::parse_from_istream(&source, MemoryModel(), IOModel());
+    const Kripke kripke(prog, Folding::none);
+
+    const auto run = search_always(kripke, [](const KState &) { return true; });
+    mu_check(run.has_value());
+    // The loop body `><` is three states: `]` jumps back to the `>`.
+    mu_check(run.value().cycle.size() == 3);
+
+    KIterator successors = kripke.successors(run.value().cycle.back());
+    bool closes = false;
+    for (successors.first(); !successors.done(); successors.next())
+        if (successors.state() == run.value().cycle.front())
+            closes = true;
+    mu_check(closes);
+}
+
+//! A `F(G(P))` counterexample may reach its cycle through states outside P.
+MU_TEST(search_eventually_always_prefix_is_unrestricted)
+{
+    std::istringstream source("+>+[]");
+    Program prog = Program::parse_from_istream(&source, MemoryModel(), IOModel());
+    const Kripke kripke(prog, Folding::values);
+
+    const auto run = search_eventually_always(
+        kripke,
+        [](const KState &state) { return state.get_mem_ptr() == 1; });
+    mu_check(run.has_value());
+    mu_check(!run.value().prefix.empty());
+    // The prefix starts on cell 0, outside the predicate ...
+    mu_check(run.value().prefix.front().get_mem_ptr() == 0);
+    // ... and only the cycle has to stay on cell 1.
+    mu_check(!run.value().cycle.empty());
+    for (const KState &state : run.value().cycle)
+        mu_check(state.get_mem_ptr() == 1);
+}
+
+//! The three searches that decide the checks and the runs they return.
+MU_TEST_SUITE(search)
+{
+    MU_RUN_TEST(search_eventually_is_shortest);
+    MU_RUN_TEST(search_always_closes_its_cycle);
+    MU_RUN_TEST(search_eventually_always_prefix_is_unrestricted);
 }
 
 //! Runs every suite and returns the minunit exit code.
@@ -1983,6 +1920,7 @@ int main()
     MU_RUN_SUITE(cell_visits);
     MU_RUN_SUITE(cell_values);
     MU_RUN_SUITE(cell_overflows);
+    MU_RUN_SUITE(search);
     MU_REPORT();
     return MU_EXIT_CODE;
 }

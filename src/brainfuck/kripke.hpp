@@ -6,7 +6,6 @@
 #include <optional>
 #include <string>
 #include <vector>
-#include <spot/kripke/kripke.hh>
 #include "memory_map.hpp"
 #include "model.hpp"
 #include "program.hpp"
@@ -15,9 +14,9 @@ namespace brainfuck
 {
     class KState;
 
-    //! Which straight-line runs the Kripke layer folds away.
+    //! Which straight-line runs the state space folds away.
     /**
-     * A folded run removes every instruction pointer inside it, so a property
+     * A folded run removes every instruction pointer inside it, so an analysis
      * may only fold a run that it cannot observe (see `spec/state-space.md`).
      * Labels are unobservable inside a block, which is why no block crosses
      * one; the memory pointer is observable to a cell-visit check, which is
@@ -73,7 +72,7 @@ namespace brainfuck
     /**
      * A wrap is a transition property, not a state property: a cell only
      * overflows when the `+` that would exceed the cell width is executed. The
-     * condition is therefore attached to the state *before* the step, whose
+     * predicate is therefore evaluated on the state *before* the step, whose
      * instruction pointer names that `+` or `-`, and it must stay false in the
      * state the wrap produces - the successor is indistinguishable from any
      * other cell holding zero or the maximum (see `spec/cell-overflow.md`).
@@ -88,8 +87,9 @@ namespace brainfuck
 
     //! What a check observes in every state.
     /**
-     * A check observes at most one of the three. An empty observation yields
-     * the same conditions as before, which is what `dot` and `check reach` use.
+     * A check observes at most one of the three. An empty observation makes
+     * `Kripke::observes()` constant false, which is what `check reach` and
+     * `dot` rely on: they observe the labels, not a cell.
      */
     struct Observation
     {
@@ -121,45 +121,19 @@ namespace brainfuck
      */
     bool wrap_test_holds(const Program &prog, const KState &state, const WrapTest &test);
 
-    //! Atomic proposition that marks the visited cell in a cell-visit analysis.
-    /**
-     * Contains an underscore, so it can never collide with a label name: the
-     * parser takes everything between two underscores as a label, and a label
-     * name therefore never contains one.
-     */
-    const char *const CELL_VISIT_PROPOSITION = "braincheck_cell_visited";
-    //! Atomic proposition that is true exactly at the program's end point.
-    /**
-     * Also contains an underscore, so it cannot collide with a label name. A
-     * cell-visit check conjoins it with the cell proposition: the end point
-     * stutters, so a property about visits *before halting* has to exclude it.
-     */
-    const char *const HALT_PROPOSITION = "braincheck_halt";
-    //! Atomic proposition that marks a state whose observed cell satisfies the test.
-    /**
-     * Also contains an underscore, so it cannot collide with a label name. The
-     * proposition is only registered when a value check observes a cell.
-     */
-    const char *const CELL_VALUE_PROPOSITION = "braincheck_cell_value";
-    //! Atomic proposition that marks a state whose next step wraps the observed cell.
-    /**
-     * Also contains an underscore, so it cannot collide with a label name. The
-     * proposition is only registered when an overflow check observes a cell.
-     */
-    const char *const CELL_WRAP_PROPOSITION = "braincheck_cell_wrap";
-
-    //! One state of the Kripke structure induced by a program.
+    //! One state of the state graph induced by a program.
     /**
      * A state is the instruction pointer, the memory pointer, the memory
-     * snapshot and the number of characters still available on stdin.
-     * The memory is a MemoryMap, so cloning a state is O(1).
+     * snapshot and the number of characters still available on stdin, exactly
+     * the tuple the analyses search over. The memory is a MemoryMap, so
+     * copying a state is O(1).
      *
-     * hash() and compare() must agree: both look at every field above,
-     * memory contents included. Otherwise Spot's hash tables store states
-     * that compare equal, exploration grows without bound and the analysis
-     * merges states that are not actually the same.
+     * hash() and compare() must agree: both look at every field above, memory
+     * contents included. Otherwise the search's hash table stores states that
+     * compare equal, the exploration grows without bound and states that are
+     * not actually the same are merged (see `spec/state-space.md`).
      */
-    class KState : public spot::state
+    class KState
     {
     public:
         //! Initial state of the default configuration: pc 0, cell 0, empty memory, unbounded input.
@@ -178,8 +152,8 @@ namespace brainfuck
                std::optional<std::size_t> remaining_stdin_chars);
         //! State at \a pc with an already persistent memory snapshot.
         /**
-         * The hash is computed once here, because Spot asks for it repeatedly
-         * and the fields never change afterwards.
+         * The hash is computed once here, because the search asks for it once
+         * per visited state and the fields never change afterwards.
          */
         KState(instr_ptr_t pc,
                mem_ptr_t mem_ptr,
@@ -200,17 +174,20 @@ namespace brainfuck
          */
         std::map<mem_ptr_t, cell_value_t> get_memory() const;
 
-        //! Deep copy owned by the caller; cheap because the memory is shared.
-        KState *clone() const override;
         //! Cached hash over pc, memory pointer, memory contents and input budget.
-        std::size_t hash() const override;
+        std::size_t hash() const;
         //! Total order over exactly the fields that \c hash() covers.
         /**
-         * Spot requires a strict weak ordering consistent with equality. An
-         * unbounded input sorts before every bounded one, and the memory is
-         * compared last through \c MemoryMap::compare().
+         * An unbounded input sorts before every bounded one - exactly the
+         * order the hash mixes in (`remaining + 1`) - and the memory is
+         * compared last through \c MemoryMap::compare(), so a consistent
+         * hash/equality pair falls out of the two.
          */
-        int compare(const spot::state *other) const override;
+        int compare(const KState &other) const;
+        //! True when \a other has the same identity as this state.
+        bool operator==(const KState &other) const;
+        //! Negation of operator==.
+        bool operator!=(const KState &other) const;
 
     private:
         //! Instruction pointer; may be the end point.
@@ -228,43 +205,60 @@ namespace brainfuck
         void update_hash();
     };
 
+    //! `std::hash` replacement that asks a state for its cached hash.
+    struct KStateHash
+    {
+        //! Cached hash of \a state; no field is read again.
+        std::size_t operator()(const KState &state) const;
+    };
+
+    //! Equality of two states, matching \c KState::compare().
+    struct KStateEqual
+    {
+        //! True when \a left and \a right are the same state.
+        bool operator()(const KState &left, const KState &right) const;
+    };
+
     //! Successors of one state, materialised on demand.
     /**
      * Only the transition itself is computed eagerly: the new instruction and
      * memory pointers, the number of characters left and the values the
-     * transition can write. dst() builds one successor when Spot asks for it,
-     * so a read does not construct all 256 states it may lead to.
+     * transition can write. `state()` builds one successor when the search
+     * asks for it, so a read does not construct all 256 states it may lead to.
      *
-     * A state at the program's end point has exactly one successor: itself. The
-     * program has halted, and staying halted is what the model checker needs to
-     * see a label behind the last instruction (see `spec/state-space.md`).
+     * A state at the program's end point has exactly one successor: itself.
+     * The program has halted, and stuttering is what makes a label behind the
+     * last instruction visible and every run infinite (see
+     * `spec/state-space.md`).
      */
-    class KIterator : public spot::kripke_succ_iterator
+    class KIterator
     {
     public:
         //! Applies the transition from \a state under \a prog.
         /**
          * \param state the state whose successors are enumerated
          * \param prog the program that gives the transition its meaning
-         * \param cond the state condition Spot attaches to the successors
          * \param folding which straight-line runs collapse into one transition
          */
-        KIterator(const KState *state, const Program &prog, bdd cond,
+        KIterator(const KState &state, const Program &prog,
                   Folding folding = Folding::straight_line);
 
         //! Rewinds to the first successor; false when there is none.
-        bool first() override;
+        bool first();
         //! Advances to the next successor; false when the last one was reached.
-        bool next() override;
+        bool next();
         //! True once every successor was visited.
         /**
          * Must stay `pos >= possible_values.size()`: the older
          * `pos >= size - 1` hid the last successor and every successor of a
          * deterministic instruction.
          */
-        bool done() const override;
-        //! Fresh successor at the current position, owned by the caller.
-        KState *dst() const override;
+        bool done() const;
+        //! Fresh successor at the current position.
+        /**
+         * \pre the iterator is positioned on a successor, i.e. not \c done()
+         */
+        KState state() const;
 
     private:
         //! Instruction pointer of the successors.
@@ -284,68 +278,61 @@ namespace brainfuck
         std::size_t pos;
     };
 
-    //! The program as a Kripke structure for Spot.
+    //! The state graph of a program, with what a check observes in it.
     /**
-     * Registers every label as an atomic proposition and attaches one state
-     * condition per instruction pointer, so a state is labelled true exactly
-     * where its pointer carries a label. A cell-visit analysis additionally
-     * tracks one cell's pointer position, a value analysis one cell's content
-     * and an overflow analysis the wrap the next step would cause; the
-     * conditions then also depend on the memory pointer, the memory contents,
-     * the instruction about to run and the end point (see
-     * `spec/state-space.md`, `spec/cell-visits.md`, `spec/cell-values.md` and
-     * `spec/cell-overflow.md`).
+     * A `Kripke` owns the program, the folding mode and the observation, and
+     * nothing else: it is the entry point the analyses and `dot` use to get
+     * the initial state, the successors of a state and the observed atom. The
+     * search itself lives in `search.hpp`; see `spec/state-space.md` for the
+     * state, transition and observation rules.
      */
-    class Kripke : public spot::kripke
+    class Kripke
     {
     public:
-        //! Builds the structure for \a program, using \a d for propositions.
+        //! Builds the graph for \a program.
         /**
          * \param program the parsed program; stored by value (copies are cheap)
-         * \param d Spot's BDD dictionary that owns the propositions
          * \param folding which straight-line runs collapse into one transition
          * \param observation what a check observes in each state; an empty
-         *                    observation adds no propositions
+         *                    observation observes nothing
          */
-        Kripke(Program program, const spot::bdd_dict_ptr &d,
+        Kripke(Program program,
                Folding folding = Folding::straight_line,
                Observation observation = {});
 
         //! Initial state: pc 0, cell 0, empty memory and the IO model's input budget.
-        KState *get_init_state() const override;
-        //! Successor iterator for \a s, labelled with the state's condition.
-        KIterator *succ_iter(const spot::state *s) const override;
-        //! Condition of \a s: its labels, plus the observed cell, value and wrap atoms.
+        KState initial_state() const;
+        //! Successor iterator for \a state.
+        KIterator successors(const KState &state) const;
+
+        //! True when the observed atom holds in \a state.
         /**
-         * The condition is a function of the whole state - instruction
-         * pointer, memory pointer, memory contents and the end point - and
-         * never of which successor is taken. Spot labels every transition that
-         * leaves a state with that state's condition, so a condition may look
-         * at cell contents even though a read has successors that differ in
-         * them; a wrap condition is true in the state *before* the wrapping
-         * step for the same reason. Pointers outside the program (there are
-         * none in practice) yield \c bdd_false().
+         * This is the inner predicate of every property: `cell` for a visit,
+         * `cell OP value` (plus the end point for `on_halt`) for a value, and
+         * `the step leaving this state wraps the cell` for an overflow. With
+         * an empty observation it is constant false, so a label check never
+         * accidentally observes a cell.
+         *
+         * A wrap is the only variant that looks at a *transition*: it is
+         * evaluated here, on the state the transition leaves, which is why the
+         * witness ends on the wrapping instruction (see
+         * `spec/cell-overflow.md`).
          */
-        bdd state_condition(const spot::state *s) const override;
-        //! Multi-line textual description of \a s for Spot's diagnostics.
-        std::string format_state(const spot::state *s) const override;
+        bool observes(const KState &state) const;
+
+        //! The program this graph was built from.
+        const Program &get_program() const;
+        //! Which straight-line runs are folded.
+        Folding get_folding() const;
+        //! What a check observes in every state.
+        const Observation &get_observation() const;
 
     private:
-        //! The program this structure was built from.
+        //! The program this graph was built from.
         Program prog;
         //! Which straight-line runs are folded.
         Folding folding;
         //! What the analysis observes in every state.
         Observation observation;
-        //! BDD of \c CELL_VISIT_PROPOSITION; only meaningful for a visit.
-        bdd cell_bdd;
-        //! BDD of \c CELL_VALUE_PROPOSITION; only meaningful for a value check.
-        bdd value_bdd;
-        //! BDD of \c CELL_WRAP_PROPOSITION; only meaningful for an overflow check.
-        bdd wrap_bdd;
-        //! BDD of \c HALT_PROPOSITION; registered when an observation needs it.
-        bdd halt_bdd;
-        //! Label condition by instruction pointer, terminal pointer included.
-        std::vector<bdd> state_conditions;
     };
 }

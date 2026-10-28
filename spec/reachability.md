@@ -1,7 +1,7 @@
 # Reachability checking (`check reach`)
 
 Implemented in `src/brainfuck/analysis.cpp` on top of
-[the state space](state-space.md) and Spot.
+[the state space](state-space.md) and the searches in `search.{hpp,cpp}`.
 
 ## The question that is answered
 
@@ -18,11 +18,13 @@ is therefore:
 Does every run - finite or infinite - eventually visit the label?
 ```
 
-The implementation builds the atomic proposition `LABEL`, the formula
-`F(LABEL)` ("eventually LABEL"), complements it to `!F(LABEL)` ("always not
-LABEL"), translates that with Spot's LTL translator and asks the Kripke
-structure for an intersecting run. A run exists exactly when the answer is
-"no, the label is not guaranteed".
+The property is `A F(LABEL)` - "on every run, eventually LABEL". Its negation
+is `E G(!LABEL)`: *some* run stays in the states that do not carry the label
+forever. In a finite state graph an infinite run inside a set of states exists
+exactly when that set contains a reachable cycle, so the implementation searches
+for a cycle reachable through unlabelled states only
+(`search_always(prog, !LABEL)` in `search.hpp`). A counterexample run exists
+exactly when the answer is "no, the label is not guaranteed".
 
 | Result | Meaning |
 | --- | --- |
@@ -51,8 +53,8 @@ loops forever without the label is one because the loop is a cycle.
 - A name that does not occur anywhere is reported as
   `Label "<x>" does not exist in the specified program.` on stderr, with exit
   status `0`; no analysis is started.
-- If the same name occurs at several instruction pointers, all of them carry
-  the proposition, so the label counts as visited when *any* of them is.
+- If the same name occurs at several instruction pointers, every occurrence
+  counts, so the label is visited when *any* of them is.
 - A label marks the state *before* the instruction it precedes: `_x_+` is true
   at the state whose `pc` is the `+`.
 - A label behind the last instruction marks the end point, i.e. "the program has

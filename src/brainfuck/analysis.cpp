@@ -1,150 +1,103 @@
-#include <string>
 #include <optional>
+#include <string>
 #include <utility>
-#include <vector>
-#include <spot/tl/parse.hh>
-#include <spot/twaalgos/translate.hh>
-#include <spot/twaalgos/emptiness.hh>
 #include "analysis.hpp"
-#include "program.hpp"
 #include "kripke.hpp"
+#include "program.hpp"
+#include "search.hpp"
 
 namespace brainfuck
 {
-    namespace
+    std::optional<Run> check_reach(Program prog, std::string label, bool compress)
     {
-        //! Finds a run of \a prog that violates \a property.
-        /**
-         * Complements \a property, translates it with Spot and asks the
-         * program's Kripke structure for an intersecting run. This is the
-         * shared engine of every check: a run exists exactly when the property
-         * does not hold on every run.
-         *
-         * \param prog the program whose runs are explored
-         * \param property the LTL property that every run should satisfy
-         * \param folding which straight-line runs may be folded away
-         * \param observation cell pointer, cell content, wrap or halt point to expose
-         */
-        std::optional<spot::twa_run_ptr> find_counterexample(
-            Program prog,
-            const spot::formula &property,
-            Folding folding,
-            Observation observation)
-        {
-            auto d = spot::make_bdd_dict();
-            spot::twa_graph_ptr af =
-                spot::translator(d).run(spot::formula::Not(property));
-            auto k = std::make_shared<Kripke>(prog, d, folding, observation);
-            if (auto run = k->intersecting_run(af))
-                return std::optional<spot::twa_run_ptr>{run};
-            return std::nullopt;
-        }
-
-        //! Turns the run of a `F(atom)` or `G(!atom)` check into its answer.
-        /**
-         * For \a every_run the run is a counterexample, so the statement holds
-         * exactly when none exists; for the existential question the run is the
-         * witness, so the statement holds exactly when one exists.
-         */
-        ValueAnswer run_answer(bool every_run, std::optional<spot::twa_run_ptr> run)
-        {
-            if (every_run)
-                return ValueAnswer{!run.has_value(), std::move(run)};
-            return ValueAnswer{run.has_value(), std::move(run)};
-        }
+        // Verified: `A F(label)`. Decided as `!E G(!label)`, so the search only
+        // walks states that do not carry the label; if the initial state
+        // carries it, the formula holds without exploring anything.
+        const Kripke kripke(std::move(prog), compress ? Folding::straight_line : Folding::none);
+        const Program &program = kripke.get_program();
+        return search_always(
+            kripke,
+            [&program, &label](const KState &state)
+            {
+                return !program.has_label_at(state.get_instr_ptr(), label);
+            });
     }
 
-    std::optional<spot::twa_run_ptr> check_reach(Program prog, std::string label, bool compress)
+    std::optional<Run> check_visit(Program prog, mem_ptr_t cell, VisitKind kind, bool fold_values)
     {
-        const spot::formula property =
-            spot::formula::F(spot::formula::ap(label));
-        return find_counterexample(
-            std::move(prog),
-            property,
-            compress ? Folding::straight_line : Folding::none,
-            Observation{});
-    }
-
-    std::optional<spot::twa_run_ptr> check_visit(
-        Program prog, mem_ptr_t cell, VisitKind kind, bool fold_values)
-    {
-        const spot::formula cell_ap =
-            spot::formula::ap(CELL_VISIT_PROPOSITION);
-        spot::formula property;
-        if (kind == VisitKind::at_least_once)
-        {
-            property = spot::formula::F(cell_ap);
-        }
-        else
-        {
-            // "Infinitely often before halting": the stuttering end point must
-            // not count as a visit, so the halt atom is part of the inner
-            // formula. A run that halts eventually satisfies halt forever and
-            // therefore violates this property.
-            const spot::formula halt_ap =
-                spot::formula::ap(HALT_PROPOSITION);
-            const spot::formula visit = spot::formula::And(
-                std::vector<spot::formula>{spot::formula::Not(halt_ap), cell_ap});
-            property = spot::formula::G(spot::formula::F(visit));
-        }
-
-        // Pointer runs are never folded here: the pointer position is the
-        // property, so Folding::straight_line would be unsound.
         Observation observation;
         observation.visited_cell = cell;
-        return find_counterexample(
-            std::move(prog),
-            property,
-            fold_values ? Folding::values : Folding::none,
-            observation);
+        const Kripke kripke(std::move(prog),
+                            fold_values ? Folding::values : Folding::none,
+                            observation);
+        const Program &program = kripke.get_program();
+
+        if (kind == VisitKind::at_least_once)
+            // Verified: `A F(cell)`. Decided as `!E G(!cell)`: a counterexample
+            // never points at the cell, the stuttering end point included.
+            return search_always(
+                kripke,
+                [&kripke](const KState &state) { return !kripke.observes(state); });
+
+        // Verified: `A G(F(!halt & cell))`. Decided as
+        // `!E F(G(halt | !cell))`: the counterexample eventually leaves the
+        // cell for good. The halt literal puts the stuttering end point into
+        // the suffix, so every terminating run is a counterexample and success
+        // proves that the program never halts.
+        return search_eventually_always(
+            kripke,
+            [&kripke, &program](const KState &state)
+            {
+                return program.is_end(state.get_instr_ptr()) || !kripke.observes(state);
+            });
     }
 
     ValueAnswer check_value(Program prog, CellTest test, ValueKind kind)
     {
-        spot::formula atom = spot::formula::ap(CELL_VALUE_PROPOSITION);
-        if (test.on_halt)
-            // A postcondition only looks at the end point, so the halt atom is
-            // part of the observed atom itself.
-            atom = spot::formula::And(
-                std::vector<spot::formula>{spot::formula::ap(HALT_PROPOSITION), atom});
-
-        // Every run must satisfy the atom: `F(atom)`, and a counterexample is a
-        // run that never does. Asking whether some run satisfies it means
-        // verifying the negation `G(!atom)`; its counterexample is the witness.
-        const bool every_run = kind == ValueKind::every_run;
-        const spot::formula property =
-            every_run ? spot::formula::F(atom)
-                      : spot::formula::G(spot::formula::Not(atom));
-
-        // A value check observes a cell's content in every state, so `+`/`-`
-        // runs must stay unfolded. A postcondition observes only the end
-        // point, so it may fold like a reachability check.
         Observation observation;
         observation.cell_test = test;
-        std::optional<spot::twa_run_ptr> run = find_counterexample(
-            std::move(prog),
-            property,
-            test.on_halt ? Folding::straight_line : Folding::pointers,
-            observation);
+        // A value check observes a cell's content in every state, so `+`/`-`
+        // runs must stay unfolded; a postcondition observes only the end point
+        // and may fold like a reachability check.
+        const Kripke kripke(std::move(prog),
+                            test.on_halt ? Folding::straight_line : Folding::pointers,
+                            observation);
 
-        return run_answer(every_run, std::move(run));
+        if (kind == ValueKind::every_run)
+        {
+            // Verified: `A F(atom)`. Decided as `!E G(!atom)`, so the
+            // counterexample stays inside the states where the test fails and
+            // the initial state is part of the requirement.
+            std::optional<Run> counterexample = search_always(
+                kripke,
+                [&kripke](const KState &state) { return !kripke.observes(state); });
+            return ValueAnswer{!counterexample.has_value(), std::move(counterexample)};
+        }
+
+        // Verified: `E F(atom)`. Decided directly by the shortest run to a
+        // state that satisfies the test; the same run refutes `A G(!atom)`.
+        std::optional<Run> witness = search_eventually(
+            kripke,
+            [&kripke](const KState &state) { return kripke.observes(state); });
+        return ValueAnswer{witness.has_value(), std::move(witness)};
     }
 
-    std::optional<spot::twa_run_ptr> check_overflow(Program prog, WrapTest test)
+    std::optional<Run> check_overflow(Program prog, WrapTest test)
     {
-        const spot::formula wrap = spot::formula::ap(CELL_WRAP_PROPOSITION);
-
-        // A wrap is an event to hunt for: verify that no run ever wraps, and
-        // take the counterexample of `G(!wrap)` as the witness. Its last state
-        // is the one whose next step wraps the cell.
-        const spot::formula property = spot::formula::G(spot::formula::Not(wrap));
-
+        Observation observation;
+        observation.wrap_test = test;
         // A wrap is one `+`/`-` instruction, so value runs must stay unfolded; a
         // folded run would hide the single step that wraps. Pointer runs change
         // no cell and may be folded.
-        Observation observation;
-        observation.wrap_test = test;
-        return find_counterexample(
-            std::move(prog), property, Folding::pointers, observation);
+        const Kripke kripke(std::move(prog), Folding::pointers, observation);
+
+        // Verified: `A G(!wrap)`. Decided as `!E F(wrap)`: the search hunts for
+        // a wrapping step, the run it returns is the counterexample, and a
+        // search that finds none proves the statement (on a finite state
+        // space). The absence of a wrap is the answer we want, so it is the
+        // green one in the CLI.
+        return search_eventually(
+            kripke,
+            [&kripke](const KState &state) { return kripke.observes(state); });
     }
 }

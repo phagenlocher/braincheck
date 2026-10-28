@@ -10,12 +10,12 @@ one that silently produces wrong answers when it is broken.
 | [memory.md](memory.md) | cells, tape, pointer and value normalisation (`MemoryModel`) |
 | [input.md](input.md) | standard input: alphabet, pinned input, end of input, length budget (`IOModel`) |
 | [execution.md](execution.md) | `execute` / `Program::run` interpreter semantics |
-| [state-space.md](state-space.md) | `KState`, `KIterator`, `Kripke`: states, transitions, conditions |
+| [state-space.md](state-space.md) | `KState`, `KIterator`, `Kripke`: states, transitions, the observed atom |
 | [memory-map.md](memory-map.md) | `MemoryMap`, the persistent memory inside a state |
 | [reachability.md](reachability.md) | `check reach`: what the answer means and what it does not |
 | [cell-visits.md](cell-visits.md) | `check visit`: pointer positions, visits before halting, counterexamples |
 | [cell-values.md](cell-values.md) | `check value`: cell contents, comparisons, halting postconditions |
-| [cell-overflow.md](cell-overflow.md) | `check overflow`: wraps past the maximum or zero, directions, witnesses |
+| [cell-overflow.md](cell-overflow.md) | `check overflow`: wraps past the maximum or zero, directions, counterexamples |
 | [cli.md](cli.md) | commands, options, defaults, streams and exit codes |
 
 Build, test and style conventions live in [AGENTS.md](../AGENTS.md). The
@@ -24,17 +24,16 @@ examples in `examples/` are documented in [examples/README.md](../examples/READM
 ## Rules that are easy to break
 
 1. `KState::hash()` and `KState::compare()` must look at exactly the same fields.
-   Different hashes for states that compare equal make Spot's hash tables grow
-   without bound; equal states for different contents silently merge runs.
+   Different hashes for states that compare equal make the search's hash table
+   grow without bound; equal states for different contents silently merge runs.
    See [state-space.md](state-space.md).
 2. `MemoryMap` nodes are immutable and shared. Moving or writing a child of a
    node corrupts every snapshot that still points at it, and the damage is
    silent. See [memory-map.md](memory-map.md).
-3. A state condition must be a function of the state alone - instruction pointer,
+3. The observed atom must be a function of the state alone - instruction pointer,
    memory pointer, memory contents and the end point - and never of which
-   successor is taken: Spot's Kripke product labels every transition leaving a
-   state with that state's condition. A read's successors differ in memory and
-   each carries its own condition, which is correct. See
+   successor is taken. A read's successors differ in memory and each is
+   evaluated on its own contents, which is correct. See
    [state-space.md](state-space.md).
 4. Never hardcode a cell modulus, a tape width or an input alphabet. Ask
    `MemoryModel`/`IOModel`. See [memory.md](memory.md) and [input.md](input.md).
@@ -56,15 +55,19 @@ examples in `examples/` are documented in [examples/README.md](../examples/READM
    it passes through and the single increment that wraps. See
    [cell-visits.md](cell-visits.md), [cell-values.md](cell-values.md),
    [cell-overflow.md](cell-overflow.md) and [state-space.md](state-space.md).
-10. One atomic proposition per label **name**, not per label-map entry. A name
-    that occurs at several pointers must produce one proposition that is true at
-    each of them; a per-entry literal becomes `name & !name` at those pointers,
-    their condition becomes `bdd_false()` and, because a product transition is
-    `state_condition & automaton_condition`, those states lose every transition
-    and all answers turn vacuous. See [state-space.md](state-space.md).
+10. A label **name** may occur at several pointers and counts at every one of
+    them. The analyses look the name up per state (`Program::has_label_at()`)
+    and scan the whole run of labels stored at that pointer, so one occurrence
+    can never hide another. See [state-space.md](state-space.md).
 11. A transition property is attached to the state it **leaves**, never to its
-    successor. Spot labels the transitions out of a state with that state's
-    condition, so an overflow atom is true in the state whose instruction is the
+    successor. The overflow atom is true in the state whose instruction is the
     wrapping `+`/`-`. Marking the successor cannot work: it only shows the
     wrapped value and has forgotten which step produced it. See
     [cell-overflow.md](cell-overflow.md).
+12. A universal check is decided through its negation, and the two negations are
+    not interchangeable: `A F(atom)` needs a counterexample that avoids the atom
+    from the *first* state, while `A G(F(atom))` accepts a prefix through the
+    atom and only requires the cycle to avoid it. `search_always` and
+    `search_eventually_always` implement exactly that difference (see
+    [reachability.md](reachability.md), [cell-visits.md](cell-visits.md) and
+    [state-space.md](state-space.md)).

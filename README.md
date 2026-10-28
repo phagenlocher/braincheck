@@ -5,9 +5,8 @@
 
 braincheck is a static and dynamic analyzer for the esoteric programming
 language [Brainfuck](https://en.wikipedia.org/wiki/Brainfuck). It parses a
-program, exposes its state space to [Spot](https://spot.lre.epita.fr) as a
-Kripke structure, and answers questions about **every** possible run instead of
-just the one you happen to execute:
+program, builds its state graph, and answers questions about **every** possible
+run instead of just the one you happen to execute:
 
 - **Is a label always reached?** — [`check reach`](#check-reach-file-label)
 - **Is a cell always visited, once or infinitely often?** —
@@ -32,10 +31,10 @@ red the repeating cycle, yellow the label that was asked for.*
 
 ```sh
 # Debian / Ubuntu
-sudo apt install cmake g++ autoconf automake libtool patch bison flex
+sudo apt install cmake g++
 
 # Fedora
-sudo dnf install cmake gcc-c++ autoconf automake libtool patch bison flex
+sudo dnf install cmake gcc-c++
 ```
 
 You need CMake 3.27.1 or newer and a C++17 compiler. There is no prebuilt
@@ -62,8 +61,8 @@ make
 ```
 
 The build is in-source, so the `braincheck` executable ends up next to
-`CMakeLists.txt`. The **first** configure also builds the bundled Spot library
-and takes several minutes; later runs detect `src/extern/spotlib` and skip it.
+`CMakeLists.txt`. It takes seconds: the only submodules are CLI11 and minunit,
+both header-only, and there is no bundled library to compile.
 
 ### 4. Verify
 
@@ -176,8 +175,8 @@ never be `300`.
 
 ### `check overflow FILE CELL [--direction overflow|underflow]`
 
-Can some run contain a step that wraps `CELL` past its range? Holding the
-maximum is not an overflow; the overflow is the `+` that crosses it:
+Does every run stay inside `CELL`'s range? Holding the maximum is not an
+overflow; the overflow is the `+` that crosses it:
 
 - **overflow** — `+` on a cell holding the maximum, say 255 on 8-bit cells;
 - **underflow** — `-` on a cell holding zero.
@@ -190,11 +189,13 @@ maximum is not an overflow; the overflow is the `+` that crosses it:
 ./braincheck check overflow examples/cell_overflow.bf 1 --direction underflow
 ```
 
-The check is always existential: it prints a witness that stops on the
-wrapping instruction, or says that no run wraps the cell. Without `--direction`
-both directions count, and the witness marker says which one was found
-(`overflows (255 + 1 -> 0)` or `underflows (0 - 1 -> 255)`). `--direction
-overflow` or `--direction underflow` narrows the question to one of them.
+The check is a safety property: it verifies that **no** run wraps the cell, so
+the green answer is `Cell N never wraps on any run.` When some run does wrap it,
+that run is printed as a counterexample, truncated on the wrapping
+instruction. Without `--direction` both directions count, and the marker says
+which one was found (`overflows (255 + 1 -> 0)` or `underflows (0 - 1 ->
+255)`). `--direction overflow` or `--direction underflow` narrows the statement
+to one of them.
 
 The maximum is the cell width's (`--cell-size`), and wrapping is unrelated to
 `--no-wrapping`, which only affects the pointer. A `,` never wraps a cell: it
@@ -212,15 +213,15 @@ space, so bound it with `--max-stdin-length` or pin it with `--input`.
 | --- | --- |
 | `braincheck execute FILE` | Interpret the program once with the real standard input. |
 | `braincheck print FILE` | Re-print the parsed program, including its labels. |
-| `braincheck dot FILE` | Print the Kripke structure as a Graphviz graph. |
+| `braincheck dot FILE` | Print the state graph as a Graphviz graph. |
 | `braincheck check reach FILE LABEL` | Is the label reached on every run? |
 | `braincheck check visit FILE CELL` | Is the cell visited at least once on every run? |
 | `braincheck check value FILE CELL OP VALUE` | Can some run reach a value satisfying `OP VALUE`? |
-| `braincheck check overflow FILE CELL` | Can the cell wrap past its maximum or zero on some run? |
+| `braincheck check overflow FILE CELL` | Does no run wrap the cell past its maximum or zero? |
 
 `--help` works on every command (`braincheck check --help`,
-`braincheck check visit --help`, and so on), and `--version` prints the Spot and
-CLI11 versions that were built in.
+`braincheck check visit --help`, and so on), and `--version` prints the program
+and CLI11 versions.
 
 ## Options
 
@@ -243,33 +244,107 @@ example `--input '\x00OK\n'`. It excludes `--max-stdin-length`, because a pinned
 input already has a length. `print` also takes `--no-labels`, and `dot` takes
 `--no-compress` to show every instruction as its own state. `check value` adds
 `--every-run` and `--on-halt`, `check overflow` adds
-`--direction both|overflow|underflow` (it is always existential),
+`--direction both|overflow|underflow` (it verifies that no run wraps the cell),
 `check visit` adds `--infinitely-often`.
 
 The full reference is in [`spec/cli.md`](spec/cli.md).
 
 ## How it works
 
-1. The source is parsed into an immutable instruction list. Straight-line `+`/`-`
-   and `>`/`<` runs are folded into single transitions when the checked property
-   does not observe them.
-2. A Kripke structure is built whose states are *(instruction pointer, memory
-   pointer, memory contents, remaining input)*. Memory is a persistent map, so
-   successors share almost all of their parent's cells.
-3. The property is written in LTL, complemented, translated by Spot, and checked
-   for an intersecting run. A counterexample is therefore a real run of the
-   program, not a heuristic.
+### 1. Program → state graph
 
-The exact rules behind the state space and both checks live in
-[`spec/`](spec/README.md). They are normative for contributors: most of them fail
-silently when broken.
+The source is parsed into an immutable instruction list. Straight-line `+`/`-`
+and `>`/`<` runs are folded into single transitions when the checked property
+does not observe them, and a state graph is built whose states are
+*(instruction pointer, memory pointer, memory contents, remaining input)*.
+Memory is a persistent map, so successors share almost all of their parent's
+cells.
+
+A **run** is an infinite path through that graph. A halting program stutters in
+its end point (the state behind the last instruction), so it also has exactly
+one infinite run: the finite execution followed by the halted state forever.
+That is what makes statements about "every run" include terminating programs.
+
+### 2. Every check is an LTL formula
+
+`F p` means "eventually `p`", `G p` means "always `p`", and `A`/`E` quantify
+over all runs:
+
+| command | property | meaning |
+| --- | --- | --- |
+| `check reach L` | `A F(L)` | every run eventually carries label `L` |
+| `check visit C` | `A F(cell C)` | every run points at cell `C` at least once |
+| `check visit C --infinitely-often` | `A G(F(!halt & cell C))` | every run points at `C` forever, before halting |
+| `check value C OP V` | `E F(C OP V)` | some run reaches a state where cell `C` satisfies the test |
+| `check value … --every-run` | `A F(C OP V)` | every run reaches such a state |
+| `check value … --on-halt` | `E F(halt & C OP V)` | some run halts with the test true |
+| `check value … --on-halt --every-run` | `A F(halt & C OP V)` | every run halts with the test true (a postcondition) |
+| `check overflow C` | `A G(!wrap(C))` | no run ever executes the `+`/`-` that wraps cell `C` |
+
+### 3. The graph search, and why it decides the formula
+
+There is no temporal-logic engine. Three graph questions cover all eight rows,
+and each has a standard equivalence:
+
+- **`E F(P)` = some reachable state satisfies `P`.** If one does, the path to it
+  is a finite witness, and it extends to an infinite run because every state has
+  a successor (a read has at least one possible byte, the end point stutters).
+  If none does, no run can reach `P`. A breadth-first search decides it and
+  returns the **shortest witness**. Its dual `A G(!P)` is decided by the same
+  search: no hit means no run ever satisfies `P`, which is the green answer of
+  `check overflow`, and a hit is the counterexample.
+- **`A F(P)`, i.e. `!E G(!P)` = some run stays in `!P` forever.** In a finite
+  graph an infinite path contains a cycle, and a cycle can be pumped into an
+  infinite path, so such a run exists exactly when the `!P` subgraph has a cycle
+  reachable **through `!P` states only** - the prefix is part of the
+  requirement. A depth-first search for a back edge returns that lasso.
+- **`A G(F(P))`, i.e. `!E F(G(!P))` = some run eventually leaves `P` for good.**
+  Here only the *suffix* must stay in `!P`; the prefix may pass through `P`.
+  The search therefore explores the whole reachable graph first and then looks
+  for a cycle inside the `!P` states.
+
+The last two look alike and are not: using `E G(!P)` for
+`check visit --infinitely-often` would reject a run that visits the cell once
+before leaving it, while using `E F(G(!P))` for `check reach` would accept a
+counterexample that visits the label first. The three routines live in
+`src/brainfuck/search.cpp`, each with the formula it decides in its contract.
+
+### 4. What `P` is
+
+`P` is evaluated on one state by `Kripke::observes()`: the pointer position
+(`check visit`), the cell content compared with `OP VALUE` (`check value`), or
+"the step leaving this state wraps the cell" (`check overflow`). A label check
+looks the name up in the label map instead. Two details matter:
+
+- **The wrap is a transition property, so it is evaluated in the state *before*
+  the wrapping instruction.** Holding the maximum is not an overflow; the
+  overflow is the `+` that crosses it. The successor only shows the wrapped
+  value and cannot say which step produced it.
+- **The end point counts** unless `--on-halt` excludes it. A halting program
+  stutters there, so `G(F(!halt & cell))` fails for every terminating run -
+  which is what makes a successful `--infinitely-often` check a proof of
+  nontermination.
+
+### 5. Folding never hides what `P` observes
+
+Folding keeps the graph small, so it may only remove states that the checked
+property cannot see. `check reach` and `dot` fold both `+`/`-` and `>`/`<`
+runs; `check visit` folds `+`/`-` only, because the pointer is observable
+(`>>>` would hide cells 1 and 2); `check value` and `check overflow` fold
+`>`/`<` only, because a cell's content and the wrapping step are observable
+(`+++++` would hide every intermediate value and the one increment that wraps),
+and `check value --on-halt` folds everything because it observes only the end
+point. Blocks never cross a label.
+
+A counterexample is therefore a real run of the modelled program, not a
+heuristic: every printed step is a transition of the graph, and the searches
+never merge states reached by different paths.
+
+The exact rules live in [`spec/`](spec/README.md) and are normative for
+contributors: most of them fail silently when broken.
 
 ## Troubleshooting
 
-- **The first build is slow.** It compiles Spot. Later `cmake .` runs reuse the
-  result.
-- **The Spot build failed.** Delete it and configure again:
-  `rm -rf src/extern/spotlib && cmake .`
 - **Submodules are missing.** Run
   `git submodule update --init --recursive`. If an older clone still fetches
   over SSH, `git submodule sync --recursive` updates the URLs from
@@ -294,28 +369,29 @@ green, and tick the roadmap below when you complete an item.
 
 ## Credits
 
-braincheck is built on three libraries, vendored as git submodules:
+braincheck vendors two header-only libraries as git submodules:
 
-- [**Spot**](https://spot.lre.epita.fr) — LTL translation, automata and model
-  checking (GPL-3.0). The core of every analysis.
 - [**CLI11**](https://github.com/CLIUtils/CLI11) — command-line parsing
   (BSD-3-Clause).
 - [**minunit**](https://github.com/siu/minunit) — the minimal test framework
   (MIT).
+
+The analyses are a direct search over the program's state graph, so braincheck
+has no model-checking dependency.
 
 Many thanks to their authors and maintainers.
 
 ## Roadmap
 
 - [ ] Better test coverage
-- [x] Fold straight-line instruction runs into single Kripke states
+- [x] Fold straight-line instruction runs into single states
 - [x] Pin the analysed input (`--input`) instead of exploring every byte
-- [ ] Merge equivalent Kripke states (bisimulation quotient)
+- [ ] Merge equivalent states (bisimulation quotient)
 - [x] Clean up `README.md`
 - [ ] More assertions
   - [x] Cell values (equality and comparisons, `--every-run`, `--on-halt`)
   - [x] Cell visits
-  - [x] Overflow and underflow (`--direction`, witness run)
+  - [x] Overflow and underflow (`--direction`, counterexample run)
 - [ ] Dynamic assertion checking with summary
 
 ## License

@@ -8,15 +8,15 @@ callbacks in `src/main.cpp`.
 | Command | Arguments | What it does |
 | --- | --- | --- |
 | *(none)* | | print the top level help, exit `0` |
-| `--version`, `-v` | | print `braincheck pre alpha`, the Spot and CLI11 versions, exit `0` |
+| `--version`, `-v` | | print `braincheck pre alpha` and the CLI11 version, exit `0` |
 | `execute` | `filepath` | interpret the program once with the real stdin ([execution.md](execution.md)) |
 | `print` | `filepath` | re-render the parsed program, one line ([language.md](language.md)) |
-| `dot` | `filepath` | print the Kripke structure as a Graphviz digraph |
+| `dot` | `filepath` | print the state graph as a Graphviz digraph |
 | `check` | | command group for analysis checks; bare `check` prints its own help, exit `0` |
 | `check reach` | `filepath` `label` | reachability analysis ([reachability.md](reachability.md)) |
 | `check visit` | `filepath` `cell` | cell visitation; `--infinitely-often` selects the before-halting GF check ([cell-visits.md](cell-visits.md)) |
 | `check value` | `filepath` `cell` `op` `value` | can some run reach a cell content satisfying `op` `value`; `--every-run` asks for all runs, `--on-halt` for a postcondition ([cell-values.md](cell-values.md)) |
-| `check overflow` | `filepath` `cell` | can the cell wrap past the maximum or zero; `--direction` narrows the wrap, a witness is printed ([cell-overflow.md](cell-overflow.md)) |
+| `check overflow` | `filepath` `cell` | does no run wrap the cell past the maximum or zero; `--direction` narrows the wrap, a counterexample is printed ([cell-overflow.md](cell-overflow.md)) |
 
 Each subcommand also accepts `-h`/`--help`. At most one subcommand may be given
 at each level. The old top-level `check_reach` spelling has been removed; use
@@ -76,9 +76,9 @@ prints a witness; `--every-run` turns it into a universal check.
 `--direction` option: `both` (the default) observes `+` past the maximum and
 `-` past zero, `overflow` only the former and `underflow` only the latter. It
 has no operator or value, because the threshold is the configured cell width
-(`--cell-size`) and not a user-supplied number, and no quantification flag: the
-check is always existential and asks whether *some* run wraps the cell (see
-[cell-overflow.md](cell-overflow.md)).
+(`--cell-size`) and not a user-supplied number, and no quantification flag: it
+verifies `A G(!wrap)` - no run may wrap the cell - and a wrapping run is the
+counterexample (see [cell-overflow.md](cell-overflow.md)).
 
 All options default to the models' own defaults (30000 cells, 8-bit cells,
 wrapping on, unbounded input, `eof_char = 0`, `no_change_on_eof` off), and an

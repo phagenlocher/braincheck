@@ -19,7 +19,7 @@ namespace argparse
     typedef void (*ExecuteFun)(std::string filename, bf::MemoryModel memory_model, bf::IOModel io_model);
     //! Callback for `print`: write the program at \a filename to stdout.
     typedef void (*PrintFun)(std::string filename, bool without_label);
-    //! Callback for `dot`: print the Kripke structure of \a filename as a graph.
+    //! Callback for `dot`: print the state graph of \a filename as a graph.
     typedef void (*DotFun)(std::string filename, bf::MemoryModel memory_model, bool compress);
     //! Callback for `check reach`: test whether \a label is always reached in \a filename.
     typedef void (*ReachFun)(std::string filename, std::string label, bf::MemoryModel memory_model, bf::IOModel io_model);

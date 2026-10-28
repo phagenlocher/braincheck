@@ -127,20 +127,20 @@ never halts fails it.
 
 ## Cell overflows (`check overflow`)
 
-`check overflow` watches for the step that wraps a cell: `+` on a cell holding
-the maximum (overflow) or `-` on a cell holding zero (underflow). A cell that
-merely *holds* 255 or 0 has not wrapped; the wrap is the instruction that
-crosses the boundary.
+`check overflow` verifies that no run wraps a cell: `+` on a cell holding the
+maximum (overflow) or `-` on a cell holding zero (underflow). A cell that merely
+*holds* 255 or 0 has not wrapped; the wrap is the instruction that crosses the
+boundary.
 
 `cell_overflow.bf` wraps cell 0 twice - it underflows from 0 to 255 on the first
 `-` and overflows back to 0 on the following `+` - and then underflows cell 1.
 Labels `_wrap_` and `_underflow_` mark the two phases.
 
 ```sh
-# both directions are observed by default; the witness says which one was found
+# both directions are observed by default; the counterexample says which one
 ./braincheck check overflow examples/cell_overflow.bf 0
 
-# narrow to the overflow: the witness stops on the `+` that goes 255 -> 0
+# narrow to the overflow: the counterexample stops on the `+` that goes 255 -> 0
 ./braincheck check overflow examples/cell_overflow.bf 0 --direction overflow
 
 # cell 0 does underflow too, on the first step
@@ -151,10 +151,11 @@ Labels `_wrap_` and `_underflow_` mark the two phases.
 ./braincheck check overflow examples/cell_overflow.bf 1 --direction overflow
 ```
 
-The check is always existential: it asks whether some run wraps the cell and
-prints that witness, truncated on the wrapping instruction. When no run wraps
-the cell it says so instead. There is no "every run" mode, because a wrap is an
-event to hunt for rather than a property of all runs.
+The check verifies that **no** run wraps the cell: when one does, that run is
+printed as a counterexample, truncated on the wrapping instruction, and when
+none does the answer is the green `Cell N never wraps on any run.` There is no
+"every run" mode, because a wrap is a defect to hunt for rather than a property
+of all runs.
 
 The threshold is the configured cell width, so `--cell-size 16` moves the
 maximum from 255 to 65535 and a single `-` then underflows to 65535.

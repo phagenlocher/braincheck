@@ -9,16 +9,18 @@ Whenever planing or doing changes, check if _ANY_ documentation needs changes, b
 ## Project
 
 braincheck is a work-in-progress static/dynamic analyzer for the esoteric
-programming language Brainfuck (GPL-3.0). A parsed program is exposed to
-[Spot](https://spot.lre.epita.fr) as a Kripke structure; assertions are answered
-with Spot's emptiness/intersection checks. Today label reachability, cell
-visitation (at least once, and infinitely often before halting), cell values
-(equality and comparisons, as a reachability question, an existential question
-or a postcondition at halting) and cell overflow/underflow (a wrap of the
-transition, in either direction) are implemented.
+programming language Brainfuck (GPL-3.0). A parsed program induces a finite
+state graph (`KState`, `KIterator`), and assertions are answered by a direct
+search over that graph (`src/brainfuck/search.{hpp,cpp}`): reachability for an
+existential check, a cycle search for a universal one. Today label
+reachability, cell visitation (at least once, and infinitely often before
+halting), cell values (equality and comparisons, as a reachability question, an
+existential question or a postcondition at halting) and cell overflow/underflow
+(a wrap of the transition, in either direction) are implemented.
 
 Language: C++17 (+ a little C in the vendored dependencies). Build system:
-CMake >= 3.27.
+CMake >= 3.27. There is **no model-checking library dependency**: the program
+has no runtime dependencies at all and no submodule besides CLI11 and minunit.
 
 ## Specification
 
@@ -32,12 +34,12 @@ it, because most of its rules fail silently when broken.
 | [spec/memory.md](spec/memory.md) | cells, tape, pointer, value normalisation (`MemoryModel`) |
 | [spec/input.md](spec/input.md) | standard input: alphabet, end of input, length budget (`IOModel`) |
 | [spec/execution.md](spec/execution.md) | `execute` / `Program::run` interpreter semantics |
-| [spec/state-space.md](spec/state-space.md) | `KState`, `KIterator`, `Kripke`: states, transitions, conditions |
+| [spec/state-space.md](spec/state-space.md) | `KState`, `KIterator`, `Kripke`: states, transitions, the observed atom |
 | [spec/memory-map.md](spec/memory-map.md) | `MemoryMap`, the persistent memory inside a state |
 | [spec/reachability.md](spec/reachability.md) | `check reach`: what the answer means and what it does not |
 | [spec/cell-visits.md](spec/cell-visits.md) | `check visit`: pointer positions, visits before halting, counterexamples |
 | [spec/cell-values.md](spec/cell-values.md) | `check value`: cell contents, comparisons, halting postconditions |
-| [spec/cell-overflow.md](spec/cell-overflow.md) | `check overflow`: wraps past the maximum or zero, directions, witnesses |
+| [spec/cell-overflow.md](spec/cell-overflow.md) | `check overflow`: wraps past the maximum or zero, directions, counterexamples |
 | [spec/cli.md](spec/cli.md) | commands, options, defaults, streams and exit codes |
 
 `spec/README.md` also lists the invariants that are most easily broken.
@@ -48,35 +50,30 @@ The build is **in-source**: configure at the repository root, and the
 `braincheck` executable is written next to the root `CMakeLists.txt`.
 
 ```sh
-git submodule update --init --recursive   # spot, CLI11, minunit
-cmake .                                   # first run also builds Spot (slow)
+git submodule update --init --recursive   # CLI11, minunit
+cmake .                                   # configure (fast, no vendored build)
 make                                      # builds braincheck
 make test                                 # builds and runs the minunit tests
 ```
 
-System dependencies (also installed by CI): `cmake`, `g++`
-(C++17), `autoconf`, `automake`, `libtool`, `patch`, `bison`, `flex`.
+System dependencies (also installed by CI): `cmake` and `g++` (C++17). Nothing
+else: there is no autotools/bison/flex/patch step and no library to bootstrap.
 
 Notes:
 
-- The first `cmake .` bootstraps Spot from `src/extern/spot` into
-  `src/extern/spotlib` (`autoreconf`, `configure --disable-python ...`,
-  `make`, `make install`) and patches its Makefile with
-  `src/extern/spot-makefile.patch` to avoid LaTeX dependencies. That can take
-  several minutes. Later configures detect `spotlib` and skip it. If a Spot
-  build fails, delete `src/extern/spotlib` and re-configure.
 - There is **no CTest integration**. `test` is a custom target that builds
   `tests` and runs it; `src/tests.cpp` uses minunit and exits with the minunit
   exit code.
 - `CMAKE_EXPORT_COMPILE_COMMANDS` is ON, so every `cmake .` writes
   `compile_commands.json` next to the root `CMakeLists.txt` (gitignored) and
   clangd/editors resolve the target include paths (`src/brainfuck`,
-  `src/argparse`, `src/extern/spotlib/include`, ...). Re-run `cmake .` after
+  `src/argparse`, `src/extern/CLI11`, ...). Re-run `cmake .` after
   adding source files or targets, then restart the language server.
-- Compiler flags are strict: `-Wall -Wextra -pedantic -Werror` plus `-g -O3`
-  and `-pthread`. Any new warning breaks the build.
-- Build output (`CMakeCache.txt`, `CMakeFiles/`, the `braincheck` binary,
-  `src/extern/spotlib`) is gitignored. Never commit generated files.
+- Compiler flags are strict: `-Wall -Wextra -pedantic -Werror` plus `-g -O3`.
+  Any new warning breaks the build. The executable is linked statically and
+  stripped after the build; the `tests` binary keeps its debug info.
+- Build output (`CMakeCache.txt`, `CMakeFiles/`, the `braincheck` binary) is
+  gitignored. Never commit generated files.
 
 ## Usage
 
@@ -124,12 +121,13 @@ the check into a postcondition in `--every-run` mode. It folds pointer runs but
 never `+`/`-` runs, because every intermediate value is observable (see
 `spec/cell-values.md`).
 
-`check overflow` watches for the step that wraps a cell: `+` on the maximum
-(overflow) or `-` on zero (underflow). It is always existential: it asks
-whether some run wraps the cell and prints a witness that stops on the wrapping
-instruction. `--direction` narrows to one direction and the default observes
-both. It folds nothing but pointer runs, because the wrapping step is a single
-`+` or `-` inside a value run (see `spec/cell-overflow.md`).
+`check overflow` verifies that no run wraps a cell: `+` on the maximum
+(overflow) or `-` on zero (underflow). It is a safety property (`A G(!wrap)`),
+so the green answer is "never wraps" and a run that wraps is printed as a
+counterexample, truncated on the wrapping instruction. `--direction` narrows to
+one direction and the default observes both. It folds nothing but pointer runs,
+because the wrapping step is a single `+` or `-` inside a value run (see
+`spec/cell-overflow.md`).
 
 Labels are written inline in the source as `_labelname_` and mark the current
 instruction pointer; `check reach` prints a counterexample run (prefix +
@@ -143,8 +141,8 @@ model objects; the flags only override the model's own defaults.
 - `src/main.cpp` — entry point. Defines the `argparse` callback lambdas
   (`exfun`, `pfun`, `dotfun`, `reachfun`, `visitfun`, `valuefun`,
   `overflowfun`) and forwards to `argparse::run_with_args`. Also holds the ANSI
-  color macros and the folding-aware counterexample and witness printers used
-  for user-facing output.
+  color macros, the folding-aware counterexample and witness printers and the
+  Graphviz writer (`print_dot`) used for user-facing output.
 - `src/argparse/` — CLI11 front end (`argparse.cpp`, `argparse.hpp`).
   Subcommands are registered here; work is delegated to the function pointers,
   never done inline. Keep argument parsing and analysis logic separated this
@@ -153,34 +151,40 @@ model objects; the flags only override the model's own defaults.
   - `program.{hpp,cpp}` — parsing from file/stream into `vector<Instruction>`,
     jump map construction, label map, interpreter (`run()`), `print()`, and the
     straight-line block table (`Block`, `block_at`, `block_end`) used by the
-    Kripke layer. The instruction list, labels, jump targets and blocks are
+    state graph. The instruction list, labels, jump targets and blocks are
     immutable and shared, so a `Program` copy is O(1).
   - `model.{hpp,cpp}` — `MemoryModel` (cell size 8/16/32 bit, wrapping
     pointer, sparse `std::map` memory) and `IOModel` (input alphabet, EOF
     character, optional input length bound).
   - `memory_map.{hpp,cpp}` — `MemoryMap`, the immutable persistent sparse map
     a `KState` stores its memory in.
-  - `kripke.{hpp,cpp}` — Spot adapter: `KState` (pc, memory pointer, memory,
-    remaining stdin), `KIterator` (lazy successor generation, folding modes),
-    `Kripke` (initial state, per-pointer label conditions, the `Observation`
-    that adds the cell pointer, cell content, wrap and halt literals, `Folding`
-    mode).
+  - `kripke.{hpp,cpp}` — the state graph: `KState` (pc, memory pointer, memory,
+    remaining stdin), `KIterator` (lazy successor generation, folding modes) and
+    `Kripke` (initial state, successors, the `Observation` atom, the `Folding`
+    mode). `Kripke::observes()` is the atom a check observes in a state; a
+    label check uses the label map and observes nothing here.
+  - `search.{hpp,cpp}` — the three graph searches every check is built on:
+    `search_eventually` (`E F(P)`, a shortest witness path), `search_always`
+    (`E G(P)`, a counterexample lasso inside the predicate) and
+    `search_eventually_always` (`E F(G(P))`, a lasso whose prefix may leave the
+    predicate). Each contract states the LTL formula it decides and why the
+    graph search is equivalent - keep those arguments in sync with
+    `spec/state-space.md`.
   - `analysis.{hpp,cpp}` — `check_reach`, `check_visit` (`VisitKind`),
     `check_value` (`ValueKind`, `CellTest`) and `check_overflow` (`WrapTest`):
-    build the LTL property, complement it, translate with Spot and look for an
-    intersecting run.
+    each states the LTL property it verifies, negates it and hands the
+    resulting predicate to one of the three searches.
   - `brainfuck.hpp` — umbrella header; `main.cpp` and `tests.cpp` include only
     this.
 - `src/tests.cpp` — minunit test suites (`parsing`, `models`, `memory_maps`,
   `hashing`, `blocks`, `kripke`, `analysis`, `cell_visits`, `cell_values`,
-  `cell_overflows`).
+  `cell_overflows`, `search`).
 - `spec/` — the behavioural specification (start at `spec/README.md`). Informative
   for users, normative for contributors.
-- `src/extern/` — git submodules (`spot`, `CLI11`, `minunit`). **Never edit
-  these**, including Spot's own sources; behaviour changes must go through the
-  patch file or upstream.
-- `.github/workflows/cmake-build-and-test.yml` — CI: submodules, apt deps,
-  `cmake .`, `make`, `make test`.
+- `src/extern/` — git submodules (`CLI11`, `minunit`), both header-only.
+  **Never edit these.**
+- `.github/workflows/cmake-build-and-test.yml` — CI: submodules, `cmake .`,
+  `make`, `make test`.
 
 ## Code conventions
 
@@ -199,7 +203,7 @@ model objects; the flags only override the model's own defaults.
   (`get_max_value()`, `get_memory_size()`, `is_wrapping()`) or use its pure
   transition helpers `pointer_left/pointer_right/next_value/prev_value/
   normalize_value/shift_value/move_pointer`. The interpreter (`Program::run`)
-  and the model checker (`KIterator`) both go through those helpers and must
+  and the state graph (`KIterator`) both go through those helpers and must
   stay in sync.
 - Cell values are `cell_value_t` (currently `uint32_t`, the widest cell) and
   input/output characters are `io_char_t` (`uint8_t`). Do not narrow state
@@ -249,10 +253,11 @@ model objects; the flags only override the model's own defaults.
   of deterministic instructions); `kripke_explores_every_input` guards this.
 - `KState::hash()` and `KState::compare()` must stay consistent. Both use `pc`,
   memory pointer, remaining input length *and* the memory contents; a mismatch
-  makes Spot's hash tables store states that compare equal, so exploring a
+  makes the search's hash table store states that compare equal, so exploring a
   program with an infinite loop grows without bound and crashes. Zero cells are
   canonicalised away by `MemoryMap` for the same reason. The hash is computed
-  once in the `KState` constructor because Spot asks for it repeatedly.
+  once in the `KState` constructor because the search asks for it once per
+  visited state and the fields never change afterwards.
 - **`MemoryMap` nodes are immutable and shared.** Never move, write or otherwise
   mutate a child of a node: the previous snapshots still point at it, and the
   damage is silent (a state loses a cell and the analysis answers nonsense).
@@ -268,8 +273,8 @@ model objects; the flags only override the model's own defaults.
   state in one exploration shares the same model, so hashing and ordering stay
   valid.
 - `KIterator` generates successors on demand: the constructor computes the
-  transition and the values it may write, `dst()` materialises one state. Do not
-  build all successors eagerly again - a read has 256 of them.
+  transition and the values it may write, `state()` materialises one state. Do
+  not build all successors eagerly again - a read has 256 of them.
 - **Blocks fold straight-line runs; they do not merge states reached by
   different paths.** `Program` builds one `Block` per instruction pointer at
   parse time. A block is a maximal run of `+`/`-` or `>`/`<`, always stops
@@ -306,9 +311,10 @@ model objects; the flags only override the model's own defaults.
   value step prints one instruction and a pointer step the whole run. Printing
   one character per state would drop the rest of a folded run and duplicate it
   in the context; printing a whole block per unfolded state would do the same
-  for the other class. `print_witness()` truncates a run at the first state a
-  value or overflow check is looking for and marks it with the text its marker
-  callable returns; `dot --no-compress` shows the fully unfolded structure.
+  for the other class. `print_truncated_run()` truncates a run at the first
+  state a value witness or an overflow counterexample is looking for and marks
+  it with the text its marker callable returns; `dot --no-compress` shows the
+  fully unfolded structure.
 - The block table encodes the tape size (pointer clamp bounds) and the cell
   width (reduced value delta). Like `set_cell_size()`, it is fixed at parse
   time; configure the models before parsing and do not mutate them afterwards.
@@ -320,41 +326,51 @@ model objects; the flags only override the model's own defaults.
 - Brainfuck has no comment syntax: every `+ - < > . , [ ]` character in a
   source file is an instruction, including the ones inside prose. The files in
   `examples/` keep their prose free of those characters for that reason.
-- Label propositions are registered from the program's label map and the label
-  part of a state condition depends only on the instruction pointer, so
-  `Kripke` precomputes one label condition per pointer (including the pointer
-  behind the program). A program without labels and without an observation
-  yields `bdd_false()` state conditions. An `Observation` makes the base
-  `bdd_true()` and `state_condition()` conjoins the observed literals: the cell
-  pointer from `mem_ptr`, the cell content from `memory.get(test.cell)`, the
-  wrap from the instruction at `pc` and `memory.get(test.cell)`, and the halt
-  literal from `pc == instr_count()`. The full condition is therefore a function
-  of the whole state - `pc`, `mem_ptr` and the memory contents - which is legal
-  because Spot labels the transitions *leaving* a state with that state's
-  condition; a read's successors each carry their own content condition. Never
-  let a condition depend on the input budget or on anything `hash()`/`compare()`
-  cannot see.
-- **A wrap is a transition, so its literal sits in the state it leaves.** The
-  overflow atom is true where the instruction at `pc` is the wrapping `+`/`-`,
-  the pointer is on the observed cell and the content is the maximum
+- **A label name may occur at several pointers, and every occurrence counts.**
+  Labels are a `std::multimap` keyed by pointer, so `has_label_at()` scans the
+  whole run of equal keys instead of looking at the first entry. A label check
+  used to turn a repeated name into `name & !name`; today the label is looked up
+  per pointer, and `check_visit_duplicate_label_name` and
+  `check_value_duplicate_label_name` guard that neither occurrence is lost.
+- **`Kripke::observes()` is the only atom a check observes.** It is false for a
+  label check (labels are looked up in the label map) and otherwise exactly one
+  of: the pointer position (`mem_ptr == cell`), the cell content
+  (`cell_test_holds()` plus the end point when `on_halt`), or the wrap
+  (`wrap_test_holds()`). Keep it a function of `(pc, mem_ptr, memory)` only:
+  a predicate that depends on the input budget or on anything `hash()`/`compare()`
+  cannot see makes the search merge states that are not the same.
+- **A wrap is a transition, so its predicate is evaluated in the state it
+  leaves.** The wrap atom is true where the instruction at `pc` is the wrapping
+  `+`/`-`, the pointer is on the observed cell and the content is the maximum
   (overflow) or zero (underflow). Marking the successor cannot work: it only
   shows the wrapped value and no longer knows which step produced it. The
   successor is also indistinguishable from any other state holding that value.
   `spec/README.md` rule 11 and `spec/cell-overflow.md` state this.
-- **The cell, value, wrap and halt proposition names contain `_`, on purpose.** A
-  label name is the text between two `_` delimiters, so it can never contain
-  one; the internal names (`braincheck_cell_visited`, `braincheck_cell_value`,
-  `braincheck_cell_wrap`, `braincheck_halt`) therefore cannot shadow a user
-  label in the same `bdd_dict`.
-- **One proposition per label name, not per label-map entry.** A name that
-  occurs at several pointers must produce one BDD variable that is true at each
-  of them. Building the literal per entry evaluates to `name & !name` at those
-  pointers, their condition becomes `bdd_false()`, and because a product
-  transition is `state_condition & automaton_condition` such a state has no
-  successor at all - every answer then turns vacuous in both directions.
-  `kripke_repeated_label_name_is_one_proposition`,
-  `check_visit_duplicate_label_name` and `check_value_duplicate_label_name`
-  guard it.
+- **The three searches decide three different LTL shapes, and mixing them up is
+  a wrong answer rather than a slow one.**
+  - `search_eventually(k, P)` decides `E F(P)` and returns the shortest path
+    (BFS, stops at the first hit). Used by `check value` (default) as a witness
+    and by `check overflow`, which verifies the dual `A G(!P)` and treats the
+    run as the counterexample.
+  - `search_always(k, P)` decides `E G(P)`: the whole run, prefix included, must
+    satisfy `P`, so the DFS never enters a state outside it. This is the
+    counterexample of `A F(!P)`, used by `check reach`, `check visit` (at least
+    once) and `check value --every-run`.
+  - `search_eventually_always(k, P)` decides `E F(G(P))`: only the *cycle* has
+    to satisfy `P`; the prefix may leave it. This is the counterexample of
+    `A G(F(!P))`, used by `check visit --infinitely-often`.
+  The `G(F(...))` variant needs the completeness pass (explore the whole
+  reachable graph, then look for the cycle), which is why it cannot stop early;
+  the `E G(...)` variant must *not* explore through states outside the atom,
+  because a run that leaves and comes back is not a counterexample to `G`.
+- Long straight-line programs make the graph deep, so both searches are
+  iterative (explicit stack, no recursion) - a recursive DFS overflows on a
+  200 000-instruction program.
+- **An unbounded symbolic input makes the state space infinite**, so a search
+  may not terminate; that is the same limitation as before and what
+  `--max-stdin-length` and `--input` are for (`spec/input.md`). The searches are
+  sound on an infinite graph (a found cycle is a real counterexample) but only
+  complete when the relevant part is finite.
 - **`check visit --infinitely-often` means "before halting".** The end point
   stutters, so the property is `G(F(!halt & cell))`, not `G(F(cell))`. Excluding
   the halt atom makes every terminating run a counterexample, which is what
@@ -363,7 +379,8 @@ model objects; the flags only override the model's own defaults.
   pointer. Guarded by `check_visit_halting_program_fails_infinitely_often` and
   `check_visit_at_least_once`.
 - Labels are a `std::multimap` keyed by instruction pointer, so several labels
-  may share one pointer and all of them are kept. `has_label` is a linear scan.
+  may share one pointer and all of them are kept. `has_label` is a linear scan
+  over the map, `has_label_at` a scan of one pointer's equal range.
 - `IOModel::read_next_char()` uses `std::cin.get()`, not `std::cin >>`, because
   formatted extraction skips whitespace and would silently drop space, tab and
   newline input characters. It also consumes the `--max-stdin-length` budget, so
@@ -382,5 +399,6 @@ model objects; the flags only override the model's own defaults.
 
 - Update the roadmap checkboxes in `README.md` when completing an item.
 - Keep changes scoped: a feature usually touches
-  `brainfuck/{program,model,kripke,analysis}`, `argparse`, and `tests.cpp`.
+  `brainfuck/{program,model,kripke,search,analysis}`, `argparse`, and
+  `tests.cpp`.
 - CI must stay green (`cmake .`, `make`, `make test`).

@@ -1,7 +1,7 @@
 # State space: `KState`, `KIterator`, `Kripke`
 
-Implemented in `src/brainfuck/kripke.{hpp,cpp}`. This is the bridge to Spot: the
-program becomes a Kripke structure whose states Spot explores.
+Implemented in `src/brainfuck/kripke.{hpp,cpp}`. The program becomes a state
+graph that the searches in `src/brainfuck/search.{hpp,cpp}` explore.
 
 ## What a state is
 
@@ -31,7 +31,8 @@ run; see [Folding modes](#folding-modes).
 A `KState` carries **no** `MemoryModel`. The model is needed only while a
 `KIterator` is constructed; an iterator keeps no `Program` afterwards.
 
-`clone()` is O(1) because the memory is shared. `get_memory_map()` returns the
+Copying a state is O(1) because the memory is shared, which is what lets the
+searches keep a state per visited node. `get_memory_map()` returns the
 `MemoryMap` by const reference and is what per-state code should use;
 `get_memory()` materialises a `std::map` and exists for tests and debugging -
 never call it in a path that runs per state.
@@ -39,7 +40,7 @@ never call it in a path that runs per state.
 ## Transitions
 
 `KIterator` computes the transition once, in its constructor, and records the
-values it may write. `dst()` then builds one successor state per call.
+values it may write. `state()` then builds one successor on demand.
 
 A state's `pc` is the first instruction of a block, so one transition applies
 the whole block (see [Block folding](#block-folding)):
@@ -92,9 +93,8 @@ Details that matter:
   can still be reported as a counterexample (see
   [reachability.md](reachability.md)). Never turn the end point back into a dead
   end.
-- `dst()` must return a **fresh** `KState` (Spot owns and destroys it) and must
-  build only the successor for the current position. Building all successors up
-  front is what made reads explode in cost.
+- `state()` must build **only** the successor for the current position. Building
+  all successors up front is what made reads explode in cost.
 - `first()` returns whether there is at least one successor, `next()` advances,
   and `done()` is `pos >= successor count`. An off-by-one in `done()` silently
   hides the last successor; `kripke_explores_every_input` guards this.
@@ -107,7 +107,7 @@ not observe the pointer. `Program` builds the block table once while parsing
 (`Block`, `block_at()`, `block_end()` in `program.hpp`); it is immutable and
 shared like the instruction list.
 
-Folding happens in the **Kripke layer only**. The parser keeps every
+Folding happens in the **state graph only**. The parser keeps every
 instruction, so `instr_count()`, `print`, `execute`, labels and jump targets are
 unchanged and `Program::run()` still interprets one character at a time.
 
@@ -143,12 +143,12 @@ interior of straight-line runs.
 | `Folding::straight_line` | `+`/`-` and `>`/`<` runs | `check reach`, `dot`, `check value --on-halt` |
 
 `Folding::values` exists because a cell-visit check observes the **memory
-pointer**. Folding a `>>>` run would hide cells 1 and 2 from the condition, so
+pointer**. Folding a `>>>` run would hide cells 1 and 2 from the predicate, so
 pointer runs stay unfolded and every pointer position is a state. A state may
 then be an interior instruction of a pointer block; `KIterator` must apply that
 single `left`/`right` move, not the whole block returned by `block_at()`. Value
 runs are still folded because they do not move the pointer. The block table is
-unchanged and still describes the runs; only the Kripke layer chooses not to
+unchanged and still describes the runs; only the graph chooses not to
 apply a pointer block.
 
 `Folding::pointers` is the mirror image. A cell-value check observes a cell's
@@ -170,76 +170,52 @@ independently of the pointer's wrapping flag (see [memory.md](memory.md)).
 `MemoryModel::shift_value()` is the helper; `build_blocks()` reduces the delta
 modulo the cell width, so an arbitrarily long run cannot overflow the counter.
 
-`Kripke(Program, dict, Folding = straight_line, Observation = {})` controls
-folding and what the analysis observes in a state (nothing, a cell's pointer
-position, a cell content test, a content test restricted to the end point, or
-the wrap the next step would cause). `check reach` uses `straight_line`; `check
-visit` uses `values`; `check value` and `check overflow` use `pointers` (`check
-value --on-halt` uses `straight_line`); `dot --no-compress` builds the unfolded
+`Kripke(Program, Folding = straight_line, Observation = {})` controls folding
+and what the analysis observes in a state (nothing, a cell's pointer position, a
+cell content test, a content test restricted to the end point, or the wrap the
+next step would cause). `check reach` uses `straight_line`; `check visit` uses
+`values`; `check value` and `check overflow` use `pointers` (`check value
+--on-halt` uses `straight_line`); `dot --no-compress` builds the unfolded
 structure for debugging (one state per instruction).
 
-## State conditions
+## The observed atom
 
-The alphabet of the Kripke structure is one atomic proposition per label
-**name**, plus the cell, value, wrap and halt propositions when a check observes
-one. The label part of a state's condition depends only on `pc`:
-
-```text
-label_part(pc) = AND over all labels (label.pc == pc ? label : !label)
-```
-
-A cell-visit check adds the pointer literal, a cell-value check the content
-literal, an overflow check the wrapping-step literal, and a visit or value check
-may add the halt literal:
+A check observes **one** atom in a state, and `Kripke::observes()` is where it
+is evaluated:
 
 ```text
-condition(pc, mem_ptr, memory) =
-    label_part(pc)
-  & (mem_ptr == visited_cell ? cell : !cell)          // check visit
-  & (memory[tested_cell] OP value ? value : !value)   // check value
-  & (next step wraps tested_cell ? wrap : !wrap)      // check overflow
-  & (pc == instr_count() ? halt : !halt)              // when halt is observed
-
+observes(pc, mem_ptr, memory) =
+      mem_ptr == visited_cell                          // check visit
+   OR (pc == instr_count() AND memory[cell] OP value)  // check value --on-halt
+   OR (memory[cell] OP value)                          // check value
+   OR next step wraps cell                             // check overflow
 ```
 
-`Kripke` builds the label part once per pointer, including
-`pc == instr_count()`. `state_condition()` combines that entry with the
-observation literals on demand, so it depends on `pc`, `mem_ptr`, the memory
-contents **and** the instruction about to run. Consequences:
+exactly one of the four branches is active, depending on the `Observation`, and
+an empty observation observes nothing (`false`). Consequences:
 
-- Several labels at the same pointer are all true there (the labels are a
-  multimap).
-- The same label name at several pointers marks all of them; Spot sees one
-  proposition that is true in each. Register that proposition **per name**, not
-  per label-map entry: a per-entry literal would evaluate to `name & !name` at
-  every pointer that carries the name and leave it with `bdd_false()` as its
-  condition. A condition-less state has no transition in Spot's product (every
-  product transition is `state_condition & automaton_condition`), so runs die
-  there and the answers turn vacuous in both directions.
-- A label behind the last instruction marks the halted state (the end point
-  above). Reaching it means the program has finished.
-- A program **without any label** gives every state `bdd_false()` when nothing
-  is observed. That is deliberate: `check reach` rejects unknown labels before
-  analysing, and a label-less graph printed by `dot` shows the condition `0`.
-  With an observation the base condition is `bdd_true()`, otherwise the observed
-  literals could never be seen.
-- The `halt` atom is true exactly at `pc == instr_count()`. `check visit`
-  without `--infinitely-often` ignores it; with the flag it is the difference
-  between "visited infinitely often" and "visited infinitely often before
-  halting" (see [cell-visits.md](cell-visits.md)). `check value --on-halt`
-  conjoins it with the content literal, which turns the check into a
-  postcondition (see [cell-values.md](cell-values.md)).
-- The `wrap` atom is true in the state **before** the wrapping `+`/`-`, not in
+- **Labels are not part of the atom.** A label check has no cell part: it looks
+  the name up in the label map per state (`Program::has_label_at()`) and uses
+  the result as its predicate. Several labels at one pointer all count there,
+  and a label name at several pointers counts at each of them.
+- **The atom is a function of the whole state.** It may look at `pc`,
+  `mem_ptr` and the memory contents, but never at which successor is taken. A
+  read is the case to watch: its successors differ in memory and each is
+  evaluated on its own contents, which is correct because the atom belongs to
+  the state the run is in, not to the edge.
+- **A value check counts the end point** unless `on_halt` restricts it to
+  `pc == instr_count()`. A halting program stutters there, so the atom stays
+  true forever - which is what makes `--on-halt` a postcondition and
+  `check visit --infinitely-often` fail on every terminating run (see
+  [cell-visits.md](cell-visits.md) and [cell-values.md](cell-values.md)).
+- **The wrap atom is true in the state *before* the wrapping `+`/`-`**, not in
   its successor: it looks at the instruction at `pc`, the memory pointer and the
-  cell content. Since a state's condition labels the transitions leaving it,
-  that is exactly the transition that wraps. The successor only shows the
-  wrapped value and cannot say which step produced it (see
+  cell content, so it describes the transition leaving the state. The successor
+  only shows the wrapped value and cannot say which step produced it (see
   [cell-overflow.md](cell-overflow.md)).
-- The cell, value, wrap and halt proposition names contain an underscore, which
-  a label name can never contain, so they cannot shadow a user label.
-
-`succ_iter()` passes `state_condition(state)` as the iterator condition, which
-is the convention `spot::kripke_succ_iterator` expects.
+- `observes()` must be a function of `(pc, mem_ptr, memory)` only: do not let it
+  depend on the input budget or on anything `hash()`/`compare()` cannot see, or
+  the search merges states that are not the same.
 
 ## Invariants (breaking these silently corrupts the analysis)
 
@@ -250,25 +226,18 @@ is the convention `spot::kripke_succ_iterator` expects.
 2. **`compare()` must be a strict weak ordering.** The implementation orders by
    `pc`, then `mem_ptr`, then the optional input budget (`nullopt` first), then
    the memory (size, hash, then entries). Any consistent total order is fine;
-   an inconsistent one makes Spot's hash tables lose or duplicate states.
-3. **A state condition must be a function of the state alone.** Spot's Kripke
-   product labels every transition leaving a state with that state's condition
-   (`succ_iter` passes `state_condition(state)`, and the product uses that single
-   label for every successor of the iterator). The condition may therefore look
-   at `pc`, `mem_ptr`, the memory contents and the end point, but never at which
-   successor is taken. A read is the case to watch: its successors differ in
-   memory and each carries its own content condition, which is correct because
-   the label belongs to the state the run is in, not to the edge. Never let a
-   condition depend on the input budget or on anything Spot cannot see in
-   `hash()`/`compare()`. Never fold across a label, never fold a pointer run when
-   the property observes the pointer, and never fold a value run when the
-   property observes a cell's content or the step that wraps it.
+   an inconsistent one makes the search's hash table lose or duplicate states.
+3. **The observed atom must be a function of the state alone.** It may look at
+   `pc`, `mem_ptr`, the memory contents and the end point, but never at which
+   successor is taken. Never fold a pointer run when the property observes the
+   pointer, and never fold a value run when the property observes a cell's
+   content or the step that wraps it.
 4. **Memory is canonical and immutable.** Zeros are absent; `KState` receives an
    already-canonical `MemoryMap` and never modifies it. See
    [memory-map.md](memory-map.md).
 5. **A state is fully described by its four fields.** Do not add derived or
-   cached state that Spot cannot see in `hash()`/`compare()`, and do not let
-   ordering depend on anything else.
+   cached state that `hash()`/`compare()` cannot see, and do not let ordering
+   depend on anything else. The cached hash is derived, not new information.
 6. **There are no dead ends.** The end point stutters, and every other state has
    a successor. A dead end would hide its labels from `dot` and make a run that
    stops there invisible to `check reach`.
@@ -276,25 +245,20 @@ is the convention `spot::kripke_succ_iterator` expects.
 ## `Kripke`
 
 - Holds a `Program` copy (O(1), see [language.md](language.md)), the folding
-  mode, the observation and the vector of per-pointer label conditions.
-- `Kripke(program, dict, Folding = straight_line, Observation = {})` folds
+  mode and the observation.
+- `Kripke(program, Folding = straight_line, Observation = {})` folds
   straight-line blocks by default (see [Block folding](#block-folding)).
   `Folding::none` gives the unfolded structure with one state per instruction
   and is used by `dot --no-compress` and the equivalence tests;
   `Folding::values` is used by cell-visit checks, `Folding::pointers` by
   cell-value and overflow checks.
-- `get_init_state()` returns a new `KState` with the program's input budget.
+- `initial_state()` returns a `KState` with the program's input budget.
   `pc = 0` is always a block start.
-- `state_conditions` has one entry per instruction pointer, including the end
-  point. Under `Folding::straight_line` the entries of folded interior pointers
-  are never reached; under `Folding::values` pointer interiors and under
-  `Folding::pointers` value interiors are reached and their label entries are
-  used. The entries are pure functions of `pc` and must stay out of
-  `hash()`/`compare()`; the observed literals are added by `state_condition()`
-  from the state's `mem_ptr`, memory contents and `pc`.
-- `format_state()` renders `pc = N; mp = N\nhash = N`. `dot` labels a node with
-  the condition of its first outgoing transition, which for this Kripke is the
-  state's own condition, so `dot` shows the labels of every state. That only
-  holds because no state is a dead end (see the invariants above).
-- `state_condition()` for a pointer outside the vector returns `bdd_false()`;
-  that cannot happen for a reachable state, it is only a guard.
+- `successors(state)` returns a `KIterator` for that state.
+- `observes(state)` is the atom described above; it is `false` for a label
+  check, which looks the label up itself.
+- `get_program()`, `get_folding()` and `get_observation()` expose the pieces
+  the searches and the printers need.
+- `dot` labels a node with the labels written at its instruction pointer
+  (`done`, `loop`, or `(none)`), plus `pc`, `mp` and the state hash. That only
+  works because no state is a dead end (see the invariants above).

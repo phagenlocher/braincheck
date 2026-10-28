@@ -1,7 +1,7 @@
 # Cell value checks (`check value`)
 
 Implemented in `src/brainfuck/analysis.cpp` on top of
-[the state space](state-space.md) and Spot.
+[the state space](state-space.md) and the searches in `search.{hpp,cpp}`.
 
 ## The questions that are answered
 
@@ -56,8 +56,8 @@ comparison.
 
 ## What is observed
 
-The value proposition is true at a state whose **memory contents** satisfy the
-comparison:
+The observed atom is true at a state whose **memory contents** satisfy the
+comparison (`Kripke::observes()`):
 
 ```text
 memory[CELL] OP VALUE

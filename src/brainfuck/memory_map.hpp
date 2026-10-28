@@ -10,17 +10,17 @@ namespace brainfuck
 {
     //! SplitMix64 finalizer used by the state and memory hashes.
     /**
-     * Mixing the raw values matters: Spot keys its state tables on hash(),
-     * and the inputs here (instruction pointers, cell indices) are small
-     * consecutive integers that std::hash leaves untouched.
+     * Mixing the raw values matters: the search keys its state table on
+     * hash(), and the inputs here (instruction pointers, cell indices) are
+     * small consecutive integers that std::hash leaves untouched.
      */
     std::size_t mix_hash(std::size_t value);
 
     //! Immutable sparse memory tape, shared between Kripke states.
     /**
      * Every Kripke transition produces a new memory snapshot and every
-     * snapshot outlives the transition that created it, because Spot keeps
-     * states in its hash tables. A std::map therefore has to be copied for
+     * snapshot outlives the transition that created it, because the search
+     * keeps states in its visited table. A std::map therefore has to be copied for
      * every successor, which makes exploration quadratic in the number of
      * cells touched.
      *

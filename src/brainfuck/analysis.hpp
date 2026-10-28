@@ -1,10 +1,10 @@
 #pragma once
 
-#include <string>
 #include <optional>
-#include <spot/twa/twa.hh>
+#include <string>
 #include "kripke.hpp"
 #include "program.hpp"
+#include "search.hpp"
 
 namespace brainfuck
 {
@@ -12,7 +12,7 @@ namespace brainfuck
     enum class VisitKind
     {
         at_least_once,   //!< `F(cell)`: every run points at the cell at least once
-        infinitely_often //!< `G(F(cell))` before halting: every run visits it forever
+        infinitely_often //!< `G(F(!halt & cell))` before halting: every run visits it forever
     };
 
     //! Which quantification a cell-value check answers.
@@ -34,14 +34,17 @@ namespace brainfuck
         //! Whether the requested statement is true.
         bool holds;
         //! Run to print: counterexample for \c every_run, witness for \c any_run.
-        std::optional<spot::twa_run_ptr> run;
+        std::optional<Run> run;
     };
 
     //! Decides whether \a label is reached on every infinite run of \a prog.
     /**
-     * Builds the LTL formula `F(label)`, complements it, translates it with
-     * Spot and looks for a run of the program's Kripke structure that
-     * intersects the complemented automaton (see `spec/reachability.md`).
+     * Verifies `A F(label)` and reports a counterexample when it fails. In the
+     * search, `A F(label)` is decided as `!E G(!label)`: a run that never
+     * carries the label is a cycle inside the states without it, reachable
+     * through states without it, which is exactly what
+     * `search_always(prog, !label)` looks for (see `search.hpp` for the
+     * equivalence and `spec/reachability.md` for the semantics).
      *
      * \param prog the parsed program; the IO and memory models inside it
      *             define which runs exist
@@ -55,19 +58,24 @@ namespace brainfuck
      * halting run, while a label that a halting run skipped yields a
      * counterexample.
      */
-    std::optional<spot::twa_run_ptr> check_reach(Program prog, std::string label, bool compress = true);
+    std::optional<Run> check_reach(Program prog, std::string label, bool compress = true);
 
     //! Decides whether every run of \a prog points at \a cell as requested.
     /**
-     * The cell proposition is true at a state whose memory pointer is \a cell.
+     * With \c VisitKind::at_least_once the property is `A F(cell)`, decided as
+     * `!E G(!cell)` by `search_always(prog, mem_ptr != cell)`. The stuttering
+     * end point counts as a visit there, so a program that moves to \a cell and
+     * then halts does visit it.
+     *
+     * With \c VisitKind::infinitely_often the property is
+     * `A G(F(!halt & cell))`, decided as `!E F(G(halt | !cell))` by
+     * `search_eventually_always(prog, halt | mem_ptr != cell)`. The prefix may
+     * visit the cell; the suffix may not, and the halt literal is what makes
+     * every terminating run a counterexample - so a successful run is a proof
+     * that the program never halts.
+     *
      * Folding is restricted to `+`/`-` runs: a folded pointer run would hide
      * the cells the pointer passes through (see `spec/cell-visits.md`).
-     *
-     * With \c VisitKind::at_least_once the property is `F(cell)`, and the
-     * stuttering end point counts, so a program that moves to \a cell and then
-     * halts does visit it. With \c VisitKind::infinitely_often the property is
-     * `G(F(!halt & cell))`: the end point does not count, so no halting run
-     * can satisfy it and success proves that every run is infinite.
      *
      * \param prog the parsed program; the IO and memory models inside it
      *             define which runs exist
@@ -80,7 +88,7 @@ namespace brainfuck
      * \pre \a cell is below `prog.memory_model.get_memory_size()`; the CLI
      *      rejects an out-of-range cell before calling this function.
      */
-    std::optional<spot::twa_run_ptr> check_visit(
+    std::optional<Run> check_visit(
         Program prog, mem_ptr_t cell, VisitKind kind, bool fold_values = true);
 
     //! Decides whether \a test holds on the runs of \a prog.
@@ -89,11 +97,14 @@ namespace brainfuck
      * value` when `test.on_halt` is set, so a postcondition check only looks at
      * the end point (see `spec/cell-values.md`).
      *
-     * `ValueKind::every_run` verifies `F(atom)` and reports a counterexample -
-     * a run in which the test never holds. `ValueKind::any_run` verifies
-     * `G(!atom)`, whose counterexample is a run that does reach the test, i.e.
-     * the witness. The initial state counts, and the stuttering end point
-     * counts unless `test.on_halt` restricts the observation to it.
+     * `ValueKind::every_run` verifies `A F(atom)` - "every run eventually
+     * satisfies the test" - and decides it as `!E G(!atom)` with
+     * `search_always(prog, !atom)`, whose lasso is the counterexample.
+     * `ValueKind::any_run` verifies `E F(atom)` with
+     * `search_eventually(prog, atom)`, whose shortest path is the witness;
+     * equivalently it refutes `A G(!atom)`. The initial state counts, and the
+     * stuttering end point counts unless `test.on_halt` restricts the
+     * observation to it.
      *
      * Folding follows what the check observes: a value check never folds
      * `+`/`-` runs, because every intermediate value is observable, while a
@@ -110,17 +121,19 @@ namespace brainfuck
      */
     ValueAnswer check_value(Program prog, CellTest test, ValueKind kind);
 
-    //! Decides whether some run of \a prog wraps \a test's cell.
+    //! Decides whether \a prog never wraps \a test's cell on any run.
     /**
-     * The observed atom is true in the state whose *next* step is the wrapping
-     * `+` or `-`: a state holds it exactly when the transition leaving it
-     * wraps the cell (see `spec/cell-overflow.md`).
+     * Verifies `A G(!wrap)`: no run ever executes the `+` that passes the cell
+     * width's maximum or the `-` that passes zero. A wrap is a defect, so the
+     * answer we want is "never"; a run that reaches a wrapping step is the
+     * counterexample and is printed (see `spec/cell-overflow.md`).
      *
-     * The check is existential. It verifies `G(!wrap)`, whose counterexample is
-     * a run that reaches a wrapping step, i.e. the witness. There is no
-     * "every run" variant: a wrap is an event to hunt for, not a property every
-     * run has to satisfy, and the universal question would answer "no" with a
-     * counterexample for almost every program.
+     * The observed atom is true in the state whose *next* step is the wrapping
+     * `+` or `-`: a state holds it exactly when the transition leaving it wraps
+     * the cell. Its complement is `E F(wrap)`, so the statement is decided by
+     * `search_eventually(prog, wrap)` - no run returned means no run wraps the
+     * cell. There is no "every run wraps" mode: that is not a question anyone
+     * asks, and its counterexample would be almost every run.
      *
      * Folding is `Folding::pointers`: a `+`/`-` run stays unfolded because the
      * wrapping step is one instruction inside it, while a `>`/`<` run changes
@@ -129,11 +142,11 @@ namespace brainfuck
      * \param prog the parsed program; the IO and memory models inside it define
      *             which runs exist and how wide a cell is
      * \param test the cell and the direction(s) to observe
-     * \return a witness run that stops at a wrapping state, or no value when no
-     *         run ever wraps the cell
+     * \return a counterexample run that stops at a wrapping state, or no value
+     *         when no run ever wraps the cell (i.e. the statement holds)
      *
      * \pre `test.cell` is below `prog.memory_model.get_memory_size()`; the CLI
      *      rejects an out-of-range cell before calling this function.
      */
-    std::optional<spot::twa_run_ptr> check_overflow(Program prog, WrapTest test);
+    std::optional<Run> check_overflow(Program prog, WrapTest test);
 }

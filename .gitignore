@@ -36,4 +36,3 @@ tests
 *.out
 *.app
 *.cmake
-src/extern/spotlib

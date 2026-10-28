@@ -48,7 +48,7 @@ namespace brainfuck
 
     //! A straight-line block starting at one instruction pointer.
     /**
-     * Blocks are the states of the folded Kripke structure: consecutive + and -
+     * Blocks are the states of the folded state graph: consecutive + and -
      * (or > and <) instructions collapse into a single transition. A block
      * never crosses a label and never contains , . [ or ], so every jump target
      * and every successor pointer is the start of a block (see
@@ -115,11 +115,19 @@ namespace brainfuck
 
         //! True when \a label occurs anywhere in the program, at any pointer.
         bool has_label(const std::string &label) const;
+        //! True when \a label is written exactly at \a pc.
+        /**
+         * A label name may occur at several pointers; every one of them counts,
+         * so this scans the whole run of labels stored at \a pc instead of
+         * looking at the first entry (see `spec/language.md`). `check reach`
+         * uses it as the atom of its property.
+         */
+        bool has_label_at(instr_ptr_t pc, const std::string &label) const;
         //! Instruction at \a pc, or no value at the end point and beyond.
         std::optional<Instruction> instr_for_pc(instr_ptr_t pc) const;
         //! True for the end point, i.e. for a pointer behind the last instruction.
         /**
-         * The end point is a state of the Kripke structure: labels written after
+         * The end point is a state of the state graph: labels written after
          * the last instruction live there. It has no instruction, so the
          * interpreter stops and the model checker stutters (see
          * `spec/state-space.md`).

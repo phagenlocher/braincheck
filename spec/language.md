@@ -23,7 +23,7 @@ an instruction, update the enum, `instr_char()`, the parser, `Program::run()`
 and `KIterator` together.
 
 Parsing keeps **every** instruction. The folding of consecutive `+`/`-` and
-`>`/`<` into one Kripke transition happens later, in the state space: the
+`>`/`<` into one transition happens later, in the state space: the
 `Program` carries a block table but `instr_count()`, `print`, `execute`, labels
 and jump targets describe the unfolded source (see
 [state-space.md](state-space.md)).
@@ -52,7 +52,7 @@ A label is written inline as `_name_` and marks the *next* instruction:
 - Labels are a `std::multimap<instr_ptr_t, std::string>`: several labels may
   share one instruction pointer, and the same *name* may appear at several
   pointers. Every occurrence is kept and every occurrence is marked in the
-  Kripke structure (see [state-space.md](state-space.md)).
+  state graph (see [state-space.md](state-space.md)).
 - Because `_` is the only label delimiter, an underscore in prose creates a
   label. `some_text_here` reads as the label `text`.
 - `has_label(name)` is a linear scan over all labels, by name.
@@ -93,10 +93,12 @@ termination or for a `,` without input.
 - `instr_count()` is the number of instructions, not the source size.
 - `instr_for_pc(pc)` returns `std::nullopt` for `pc >= instr_count()`, which is
   how the end point is detected; `is_end(pc)` says the same thing explicitly and
-  is what the model checker and the counterexample display use.
+  is what the searches, the checks and the counterexample display use.
 - `label_for_instr_ptr(pc)` returns one of the labels at `pc`, if any.
-- `get_label_map()` exposes the label multimap; the state conditions are built
-  from it once per `Kripke`.
+- `has_label_at(pc, name)` answers whether that name is written at that exact
+  pointer, scanning all labels stored there.
+- `get_label_map()` exposes the label multimap; `dot` prints its names as the
+  node label.
 - `block_at(pc)` returns the straight-line block that covers `pc`, and
   `block_end(pc)` the pc after it (`block_end(instr_count())` is
   `instr_count()`). The block table has one entry per instruction pointer and is

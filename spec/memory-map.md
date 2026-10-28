@@ -4,7 +4,7 @@ Implemented in `src/brainfuck/memory_map.{hpp,cpp}`.
 
 Every `KState` stores its cells in a `MemoryMap`. It is a persistent
 (structurally shared) map because every transition produces a new snapshot and
-every snapshot stays alive in Spot's hash tables: copying a `std::map` per
+every snapshot stays alive in the search's state table: copying a `std::map` per
 successor made exploration quadratic in the number of live cells.
 
 ## Representation

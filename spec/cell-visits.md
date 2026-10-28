@@ -1,7 +1,7 @@
 # Cell visitation checks (`check visit`)
 
 Implemented in `src/brainfuck/analysis.cpp` on top of
-[the state space](state-space.md) and Spot.
+[the state space](state-space.md) and the searches in `search.{hpp,cpp}`.
 
 ## The questions that are answered
 
@@ -30,7 +30,8 @@ The answers are:
 
 ## What "visited" means
 
-The cell proposition is true at a state whose **memory pointer** is `CELL`.
+The observed atom is true at a state whose **memory pointer** is `CELL`
+(`Kripke::observes()`).
 
 - The initial state counts: the pointer starts on cell 0, so `check visit FILE 0`
   succeeds for every program.
@@ -47,8 +48,8 @@ The cell proposition is true at a state whose **memory pointer** is `CELL`.
 
 The end point (`pc == instr_count()`) stutters. If it counted as a visit, every
 halting program would visit its final cell infinitely often. That is not what
-"before halting" means, so a cell-visit check adds the `halt` atom, which is
-true exactly at the end point:
+"before halting" means, so the infinitely-often property conjoins `!halt`,
+where `halt` is true exactly at the end point:
 
 - `check visit` uses `F(CELL)`. The halting state **does** count here: `+>` moves
   the pointer to cell 1 and then halts, and that final move did reach cell 1.
@@ -67,10 +68,9 @@ Consequences:
   `+>+[]` loops forever on cell 1, so `check visit FILE 1 --infinitely-often`
   succeeds while cell 0 is reported as visited only finitely often.
 
-`halt` is an internal atomic proposition (`braincheck_halt`). It is registered
-when a visit check runs and never appears in a source label: like the cell
-proposition, its name contains an underscore, which the label parser never
-produces.
+`halt` is not source syntax and cannot be named by a label: it is the end point
+`pc == instr_count()`, evaluated by the search. A label with the same spelling
+would be a different thing - labels are looked up in the label map.
 
 ## Counterexample runs
 
@@ -123,6 +123,6 @@ label in `check reach`. No analysis is started.
 The check is exact over the concrete state space (memory contents, input budget,
 tape configuration), not over an abstraction. It does not merge states reached
 by different paths and does not infer invariants. It folds `+`/`-` runs only,
-which removes no pointer position and no labelled path. The `halt` atom is a
-state condition, not a change to the transition system: the end point still
-stutters, as required by [state-space.md](state-space.md).
+which removes no pointer position and no labelled path. The halt part of the
+atom is a state predicate, not a change to the transition system: the end point
+still stutters, as required by [state-space.md](state-space.md).

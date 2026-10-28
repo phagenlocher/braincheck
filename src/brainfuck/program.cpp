@@ -225,6 +225,15 @@ namespace brainfuck
         return false;
     }
 
+    bool Program::has_label_at(instr_ptr_t pc, const std::string &label) const
+    {
+        const auto range = this->labels->equal_range(pc);
+        for (auto entry = range.first; entry != range.second; ++entry)
+            if (entry->second == label)
+                return true;
+        return false;
+    }
+
     std::optional<Instruction> Program::instr_for_pc(instr_ptr_t pc) const
     {
         if (pc < this->ops->size())
