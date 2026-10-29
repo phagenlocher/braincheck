@@ -8,11 +8,11 @@ endif()
 
 add_executable(${PROJECT_NAME} main.cpp)
 
-# Drop the debug info before installing, so the shipped binary stays small; the
-# `tests` target keeps its own debug info.
+# Fully strip the shipped binary so it stays small; the `tests` target is built
+# with -g and keeps its own debug info.
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-    COMMAND ${CMAKE_STRIP} --strip-debug $<TARGET_FILE:${PROJECT_NAME}>
-    COMMENT "Stripping debug info from ${PROJECT_NAME}"
+    COMMAND ${CMAKE_STRIP} $<TARGET_FILE:${PROJECT_NAME}>
+    COMMENT "Stripping ${PROJECT_NAME}"
     VERBATIM)
 
 add_subdirectory(brainfuck)
@@ -38,6 +38,7 @@ target_link_libraries(argparse PRIVATE brainfuck)
 
 # Tests
 add_executable(tests EXCLUDE_FROM_ALL tests.cpp)
+target_compile_options(tests PRIVATE -g)
 target_include_directories(tests PRIVATE brainfuck)
 target_include_directories(tests PRIVATE extern/minunit)
 target_link_libraries(tests PRIVATE brainfuck)

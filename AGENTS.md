@@ -69,9 +69,10 @@ Notes:
   clangd/editors resolve the target include paths (`src/brainfuck`,
   `src/argparse`, `src/extern/CLI11`, ...). Re-run `cmake .` after
   adding source files or targets, then restart the language server.
-- Compiler flags are strict: `-Wall -Wextra -pedantic -Werror` plus `-g -O3`.
+- Compiler flags are strict: `-Wall -Wextra -pedantic -Werror` plus `-O3`.
   Any new warning breaks the build. The executable is linked statically and
-  stripped after the build; the `tests` binary keeps its debug info.
+  fully stripped after the build; `tests` is built with `-g` and keeps its
+  debug info.
 - Build output (`CMakeCache.txt`, `CMakeFiles/`, the `braincheck` binary) is
   gitignored. Never commit generated files.
 
